@@ -290,11 +290,41 @@ def prepare_dataset(data_dirs, person_labels, action_labels):
 def main():
     """Main training function."""
     
-    # Example: Define your dataset structure
-    # For now, we'll use the provided data as a single sample
-    data_dirs = ['mmwave']  # Add more directories as you collect more data
-    person_labels = ['Person1']  # Corresponding person labels
-    action_labels = ['A11']  # Corresponding action labels
+    # Specify which actions to include in training
+    target_actions = {'A11', 'A13', 'A14', 'A17', 'A18'}
+    
+    # Scan data directories from your folder structure
+    # Define base path to your data folders (adjust this path as needed)
+    base_path = Path('t:/Niki/Documents/School')  # Change this to your data root
+    
+    # Collect all directories containing frame*.bin files
+    data_dirs = []
+    person_labels = []
+    action_labels = []
+    
+    # Scan for directories matching pattern E*/S*/A*/
+    for episode_dir in sorted(base_path.glob('E*/S*/A*')):
+        # Extract labels from path structure
+        parts = episode_dir.parts
+        episode = parts[-3]  # E01, E02, etc.
+        session = parts[-2]   # S01, S02, etc.
+        action = parts[-1]    # A01, A02, etc.
+        
+        # Skip if action is not in target list (only if target_actions is not empty)
+        if target_actions and action not in target_actions:
+            continue
+        
+        # Check if directory contains frame*.bin files in mmwave subdirectory
+        mmwave_dir = episode_dir / 'mmwave'
+        if mmwave_dir.exists() and any(mmwave_dir.glob('frame*.bin')):
+            data_dirs.append(str(mmwave_dir))
+            person_labels.append(f'{episode}_{session}')  # e.g., 'E01_S01'
+            action_labels.append(action)  # e.g., 'A01'
+    
+    if not data_dirs:
+        print(f"No data directories found at {base_path}")
+        print("Please ensure your data path is correct and contains frame*.bin files")
+        return
     
     print("Preparing dataset...")
     data_structure, person_encoder, action_encoder = prepare_dataset(
