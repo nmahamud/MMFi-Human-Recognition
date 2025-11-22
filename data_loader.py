@@ -88,12 +88,13 @@ class MMWaveDataLoader:
             print(f"Error loading {frame_path}: {e}")
             return np.zeros((0, 4))
     
-    def load_sequence(self, frame_dir: str) -> np.ndarray:
+    def load_sequence(self, frame_dir: str, frame_segment: str = None) -> np.ndarray:
         """
         Load a sequence of frames from a directory.
         
         Args:
             frame_dir: Directory containing frame*.bin files
+            frame_segment: Optional segment string like '1-7' to load only specific frames
             
         Returns:
             numpy array of shape (num_frames, max_points, features)
@@ -104,11 +105,38 @@ class MMWaveDataLoader:
         if not frame_files:
             raise ValueError(f"No frame files found in {frame_dir}")
         
-        # Load all frames
+        # If frame_segment is specified, extract the frame range
+        frame_indices = None
+        if frame_segment:
+            try:
+                parts = str(frame_segment).split('-')
+                if len(parts) == 2:
+                    start, end = int(parts[0]), int(parts[1])
+                    # Handle reversed ranges by swapping
+                    if start > end:
+                        start, end = end, start
+                    # Convert to 0-indexed
+                    frame_indices = set(range(start - 1, end))
+            except (ValueError, AttributeError):
+                # If parsing fails, load all frames
+                pass
+        
+        # Load all frames or only specified segment
         frames = []
-        for frame_file in frame_files:
+        for i, frame_file in enumerate(frame_files):
+            # If we have frame_indices, only load frames in that range
+            if frame_indices is not None:
+                if i not in frame_indices:
+                    continue
             frame_data = self.load_frame(str(frame_file))
             frames.append(frame_data)
+        
+        if not frames:
+            # If no frames match segment, load all frames as fallback
+            frames = []
+            for frame_file in frame_files:
+                frame_data = self.load_frame(str(frame_file))
+                frames.append(frame_data)
         
         # Find max number of points across all frames
         max_points = max(len(frame) for frame in frames)
