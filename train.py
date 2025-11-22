@@ -14,6 +14,7 @@ from tqdm import tqdm
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 import matplotlib.pyplot as plt
+import pandas as pd
 
 from data_loader import MMWaveDataLoader, MMWaveDataset
 from model import MMWavePointNet, MMWave3DCNN
@@ -33,7 +34,7 @@ class MMWaveTorchDataset(Dataset):
     
     def __getitem__(self, idx):
         sample = self.data_structure[idx]
-        sequence = self.loader.load_sequence(sample['path'])
+        sequence = self.loader.load_sequence(sample['path'], frame_segment=sample.get('frame_segment'))
         
         # Limit frames and points if specified
         if self.max_frames and sequence.shape[0] > self.max_frames:
@@ -256,14 +257,15 @@ class Trainer:
         print(f"Training history plot saved to {save_path}")
 
 
-def prepare_dataset(data_dirs, person_labels, action_labels):
+def prepare_dataset(data_dirs, person_labels, action_labels, frame_segments=None):
     """
     Prepare dataset structure from directories.
     
     Args:
         data_dirs: List of paths to directories containing frame*.bin files
-        person_labels: List of person labels (e.g., ['Person1', 'Person1', ...])
-        action_labels: List of action labels (e.g., ['A11', 'A12', ...])
+        person_labels: List of person labels
+        action_labels: List of action labels
+        frame_segments: List of frame segment strings (e.g., '1-7', '8-15') or None
     
     Returns:
         data_structure, person_encoder, action_encoder
@@ -281,7 +283,8 @@ def prepare_dataset(data_dirs, person_labels, action_labels):
         data_structure.append({
             'path': path,
             'person_id': person_ids[i],
-            'action_id': action_ids[i]
+            'action_id': action_ids[i],
+            'frame_segment': frame_segments[i] if frame_segments else None
         })
     
     return data_structure, person_encoder, action_encoder
@@ -297,11 +300,37 @@ def main():
     # Scan data directories from your folder structure
     # Define base path to your data folders (adjust this path as needed)
     base_path = Path('t:/Niki/Documents/School')  # Change this to your data root
+    csv_path = base_path / 'MMFi_action_segments - MMFi_action_segments.csv'
+    
+    # Load CSV to get frame segment information
+    df = pd.read_csv(csv_path, header=None)
+    
+    # Parse CSV to build frame segment mapping
+    # Format: "E##,S##,A##,segments"
+    segments_map = {}
+    for idx, row in df.iterrows():
+        first_col = row[0]
+        if isinstance(first_col, str) and first_col.startswith('E'):
+            parts = first_col.split(',')
+            if len(parts) >= 4:
+                episode, session, action = parts[0], parts[1], parts[2]
+                key = f'{episode}_{session}_{action}'
+                
+                # Extract frame segments from remaining columns
+                segments = []
+                for col_idx in range(3, len(row)):
+                    if pd.notna(row[col_idx]):
+                        seg_str = str(row[col_idx]).strip()
+                        if seg_str and seg_str != '':
+                            segments.append(seg_str)
+                
+                segments_map[key] = segments
     
     # Collect all directories containing frame*.bin files
     data_dirs = []
     person_labels = []
     action_labels = []
+    frame_segments = []
     
     # Scan for directories matching pattern E*/S*/A*/
     for episode_dir in sorted(base_path.glob('E*/S*/A*')):
@@ -318,9 +347,23 @@ def main():
         # Check if directory contains frame*.bin files in mmwave subdirectory
         mmwave_dir = episode_dir / 'mmwave'
         if mmwave_dir.exists() and any(mmwave_dir.glob('frame*.bin')):
-            data_dirs.append(str(mmwave_dir))
-            person_labels.append(f'{episode}_{session}')  # e.g., 'E01_S01'
-            action_labels.append(action)  # e.g., 'A01'
+            key = f'{episode}_{session}_{action}'
+            
+            # Get frame segments for this action from CSV
+            if key in segments_map:
+                # Use full action (not individual segments) to preserve action context
+                # Each segment becomes a different instance but loads the full action
+                for segment in segments_map[key]:
+                    data_dirs.append(str(mmwave_dir))
+                    person_labels.append(episode)  # Use only episode as person identifier
+                    action_labels.append(action)
+                    frame_segments.append(None)  # Don't use frame segmentation
+            else:
+                # If not in CSV, treat entire action folder as one sample
+                data_dirs.append(str(mmwave_dir))
+                person_labels.append(episode)
+                action_labels.append(action)
+                frame_segments.append(None)  # No specific segment
     
     if not data_dirs:
         print(f"No data directories found at {base_path}")
@@ -329,11 +372,11 @@ def main():
     
     print("Preparing dataset...")
     print(f"Sample paths being loaded:")
-    for i, path in enumerate(data_dirs[:3]):  # Show first 3
-        print(f"  {i}: {path}")
+    for i, (path, seg) in enumerate(zip(data_dirs[:3], frame_segments[:3])):  # Show first 3
+        print(f"  {i}: {path} | Segment: {seg}")
     
     data_structure, person_encoder, action_encoder = prepare_dataset(
-        data_dirs, person_labels, action_labels
+        data_dirs, person_labels, action_labels, frame_segments
     )
     
     # Save label encoders
@@ -343,6 +386,8 @@ def main():
     print(f"Number of persons: {len(person_encoder.classes_)}")
     print(f"Number of actions: {len(action_encoder.classes_)}")
     print(f"Total samples: {len(data_structure)}")
+    print(f"Person classes: {person_encoder.classes_}")
+    print(f"Action classes: {action_encoder.classes_}")
     
     # For demonstration with single sample, we'll duplicate it
     # In practice, you should have multiple samples for training
@@ -363,6 +408,14 @@ def main():
     # From inspect_data.py: 297 frames, max 145 points (95th percentile: 120)
     train_dataset = MMWaveTorchDataset(train_data, max_frames=297, max_points=150)
     val_dataset = MMWaveTorchDataset(val_data, max_frames=297, max_points=150)
+    
+    # Debug: Check a sample
+    print("\nDebug: Checking first sample...")
+    sample = train_dataset[0]
+    print(f"  Sample shape: {sample['sequence'].shape}")
+    print(f"  Sample min/max: {sample['sequence'].min():.4f} / {sample['sequence'].max():.4f}")
+    print(f"  Sample contains NaN: {torch.isnan(sample['sequence']).any()}")
+    print(f"  Person ID: {sample['person_id']}, Action ID: {sample['action_id']}")
     
     # Create dataloaders
     train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, 
