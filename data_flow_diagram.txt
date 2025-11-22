@@ -1,0 +1,66 @@
+
+    
+INPUT: mmWave Radar Frames
+|
+|  Shape: (batch, 297 frames, ~100 points, 4 features)
+|  Each point: [x, y, z, intensity]
+|
++-----------------------------------------------------+
+|                                                     |
+v                                                     v
+FRAME 1                  ...                    FRAME 297
+(~100 points, 4 features)                       (~100 points, 4 features)
+|                                               |
+|  [Point-wise Processing]                     |  [Point-wise Processing]
+|  +-----------------+                          |  +-----------------+
+|  | Conv1D(4->64)   |                          |  | Conv1D(4->64)   |
+|  | Conv1D(64->128) |                          |  | Conv1D(64->128) |
+|  | Conv1D(128->256)|                          |  | Conv1D(128->256)|
+|  +-----------------+                          |  +-----------------+
+|           |                                   |           |
+|  [Global Max Pooling]                         |  [Global Max Pooling]
+|           |                                   |           |
+|    (256 features)                             |    (256 features)
+|           |                                   |           |
+|  [Dense Layer]                                |  [Dense Layer]
+|           |                                   |           |
+|    (128 features)                             |    (128 features)
+|           |                                   |           |
++-----------+-----------------------------------+-----------+
+            |
+            |  Frame Features: (batch, 297, 128)
+            |
+            v
+    +-------------------+
+    |  Bidirectional    |
+    |  LSTM (2 layers)  |
+    |                   |
+    |  Hidden: 128      |
+    |  Output: 256      |
+    +-------------------+
+            |
+            |  Take last time step: (batch, 256)
+            |
+            +----------------------------+-----------------------------+
+            |                            |                             |
+            v                            v                             v
+    +--------------+           +--------------+           +--------------+
+    |    Shared    |           |   Person     |           |   Action     |
+    |  Features    |---------> |  Classifier  |           |  Classifier  |
+    |  (256 dim)   |           |              |           |              |
+    +--------------+           |  Dense(128)  |           |  Dense(128)  |
+                               |  Dense(N)    |           |  Dense(M)    |
+                               +--------------+           +--------------+
+                                      |                          |
+                                      v                          v
+                               Person Prediction         Action Prediction
+                               (e.g., "Person1")        (e.g., "A11")
+                               Confidence: 95.2%         Confidence: 98.4%
+
+KEY FEATURES:
+  + Handles variable number of points per frame
+  + Permutation invariant (point order doesn't matter)
+  + Temporal modeling with LSTM
+  + Multi-task learning (person + action)
+  + End-to-end trainable
+
