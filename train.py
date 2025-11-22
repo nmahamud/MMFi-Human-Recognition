@@ -23,16 +23,61 @@ from model import MMWavePointNet, MMWave3DCNN
 class MMWaveTorchDataset(Dataset):
     """PyTorch Dataset wrapper for mmWave data."""
     
-    def __init__(self, data_structure, max_frames=None, max_points=None):
+    def __init__(self, data_structure, max_frames=None, max_points=None, preload=True, device='cpu'):
         self.data_structure = data_structure
         self.loader = MMWaveDataLoader(".")
         self.max_frames = max_frames
         self.max_points = max_points
+        self.preload = preload
+        self.device = device
+        self.cache = {}
+        
+        # Preload all data if requested
+        if preload:
+            print("Preloading dataset into memory...")
+            for idx in tqdm(range(len(data_structure)), desc="Preloading"):
+                self._load_and_cache(idx)
+        
+    def _load_and_cache(self, idx):
+        """Load sequence and cache it."""
+        if idx in self.cache:
+            return
+        
+        sample = self.data_structure[idx]
+        sequence = self.loader.load_sequence(sample['path'], frame_segment=sample.get('frame_segment'))
+        
+        # Limit frames and points if specified
+        if self.max_frames and sequence.shape[0] > self.max_frames:
+            sequence = sequence[:self.max_frames]
+        if self.max_points and sequence.shape[1] > self.max_points:
+            sequence = sequence[:, :self.max_points]
+        
+        # Pad frames if needed
+        if self.max_frames and sequence.shape[0] < self.max_frames:
+            padding = np.zeros((self.max_frames - sequence.shape[0], 
+                              sequence.shape[1], sequence.shape[2]))
+            sequence = np.vstack([sequence, padding])
+        
+        # Pad points if needed
+        if self.max_points and sequence.shape[1] < self.max_points:
+            padding = np.zeros((sequence.shape[0], 
+                              self.max_points - sequence.shape[1], 
+                              sequence.shape[2]))
+            sequence = np.concatenate([sequence, padding], axis=1)
+        
+        self.cache[idx] = {
+            'sequence': torch.FloatTensor(sequence),
+            'person_id': sample['person_id'],
+            'action_id': sample['action_id']
+        }
         
     def __len__(self):
         return len(self.data_structure)
     
     def __getitem__(self, idx):
+        if self.preload:
+            return self.cache[idx]
+        
         sample = self.data_structure[idx]
         sequence = self.loader.load_sequence(sample['path'], frame_segment=sample.get('frame_segment'))
         
@@ -63,7 +108,7 @@ class MMWaveTorchDataset(Dataset):
 
 
 def collate_fn(batch):
-    """Custom collate function for batching."""
+    """Custom collate function for batching - minimal CPU work."""
     sequences = torch.stack([item['sequence'] for item in batch])
     person_ids = torch.LongTensor([item['person_id'] for item in batch])
     action_ids = torch.LongTensor([item['action_id'] for item in batch])
@@ -92,6 +137,7 @@ class Trainer:
     
     def train_epoch(self, dataloader, optimizer, criterion_person, criterion_action):
         """Train for one epoch."""
+        import time
         self.model.train()
         total_loss = 0
         correct_person = 0
@@ -99,10 +145,12 @@ class Trainer:
         total_samples = 0
         
         pbar = tqdm(dataloader, desc='Training')
-        for batch in pbar:
+        for batch_idx, batch in enumerate(pbar):
+            # Time the data transfer
             sequences = batch['sequence'].to(self.device)
             person_labels = batch['person_id'].to(self.device)
             action_labels = batch['action_id'].to(self.device)
+            torch.cuda.synchronize()  # Ensure transfer is complete
             
             optimizer.zero_grad()
             
@@ -117,6 +165,7 @@ class Trainer:
             # Backward pass
             loss.backward()
             optimizer.step()
+            torch.cuda.synchronize()
             
             # Statistics
             total_loss += loss.item()
@@ -404,10 +453,9 @@ def main():
     print(f"Validation samples: {len(val_data)}")
     
     # Create datasets
-    # Set max_frames and max_points based on data analysis
-    # From inspect_data.py: 297 frames, max 145 points (95th percentile: 120)
-    train_dataset = MMWaveTorchDataset(train_data, max_frames=297, max_points=150)
-    val_dataset = MMWaveTorchDataset(val_data, max_frames=297, max_points=150)
+    # Use 128 frames for good balance between computation and I/O
+    train_dataset = MMWaveTorchDataset(train_data, max_frames=128, max_points=150, preload=False, device='cpu')
+    val_dataset = MMWaveTorchDataset(val_data, max_frames=128, max_points=150, preload=False, device='cpu')
     
     # Debug: Check a sample
     print("\nDebug: Checking first sample...")
@@ -418,10 +466,12 @@ def main():
     print(f"  Person ID: {sample['person_id']}, Action ID: {sample['action_id']}")
     
     # Create dataloaders
-    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, 
-                             collate_fn=collate_fn)
-    val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False,
-                           collate_fn=collate_fn)
+    # Windows doesn't support num_workers well, so use 0
+    # Use larger batch size to maximize GPU utilization
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, 
+                             collate_fn=collate_fn, num_workers=0, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False,
+                           collate_fn=collate_fn, num_workers=0, pin_memory=True)
     
     # Create model
     num_persons = len(person_encoder.classes_)
@@ -432,7 +482,7 @@ def main():
         num_persons=num_persons,
         num_actions=num_actions,
         input_features=4,
-        hidden_dim=128
+        hidden_dim=512
     )
     
     # Count parameters
@@ -442,6 +492,9 @@ def main():
     # Create trainer
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device}")
+    if device == 'cuda':
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
     
     trainer = Trainer(model, device=device)
     
@@ -465,8 +518,8 @@ def main():
         'num_persons': num_persons,
         'num_actions': num_actions,
         'input_features': 4,
-        'hidden_dim': 128,
-        'max_frames': 297,
+        'hidden_dim': 512,
+        'max_frames': 128,
         'max_points': 150
     }
     
