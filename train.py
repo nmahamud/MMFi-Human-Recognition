@@ -291,8 +291,9 @@ def main():
     """Main training function."""
     
     # Specify which actions to include in training
-    target_actions = {'A11', 'A13', 'A14', 'A17', 'A18'}
-    
+    #target_actions = {'A11', 'A13', 'A14', 'A17', 'A18'}
+    target_actions = {}
+
     # Scan data directories from your folder structure
     # Define base path to your data folders (adjust this path as needed)
     base_path = Path('t:/Niki/Documents/School')  # Change this to your data root
@@ -327,6 +328,10 @@ def main():
         return
     
     print("Preparing dataset...")
+    print(f"Sample paths being loaded:")
+    for i, path in enumerate(data_dirs[:3]):  # Show first 3
+        print(f"  {i}: {path}")
+    
     data_structure, person_encoder, action_encoder = prepare_dataset(
         data_dirs, person_labels, action_labels
     )
