@@ -3,6 +3,7 @@ Training script for mmWave human activity and person recognition.
 """
 
 import os
+import time
 import numpy as np
 import torch
 import torch.nn as nn
@@ -235,6 +236,7 @@ class Trainer:
         
         for epoch in range(num_epochs):
             print(f"\nEpoch {epoch+1}/{num_epochs}")
+            start_time = time.time()
             
             # Train
             train_loss, train_person_acc, train_action_acc = self.train_epoch(
@@ -258,9 +260,11 @@ class Trainer:
             scheduler.step(val_loss)
             
             # Print epoch summary
+            duration = time.time() - start_time
             print(f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
             print(f"Train Person Acc: {train_person_acc:.2f}% | Val Person Acc: {val_person_acc:.2f}%")
             print(f"Train Action Acc: {train_action_acc:.2f}% | Val Action Acc: {val_action_acc:.2f}%")
+            print(f"Epoch Duration: {duration:.2f}s")
             
             # Save best model
             if val_loss < best_val_loss:
@@ -404,13 +408,13 @@ def main():
                 # Each segment becomes a different instance but loads the full action
                 for segment in segments_map[key]:
                     data_dirs.append(str(mmwave_dir))
-                    person_labels.append(episode)  # Use only episode as person identifier
+                    person_labels.append(session)  # Use session (Student) as person identifier
                     action_labels.append(action)
                     frame_segments.append(None)  # Don't use frame segmentation
             else:
                 # If not in CSV, treat entire action folder as one sample
                 data_dirs.append(str(mmwave_dir))
-                person_labels.append(episode)
+                person_labels.append(session)
                 action_labels.append(action)
                 frame_segments.append(None)  # No specific segment
     
@@ -503,7 +507,7 @@ def main():
     history = trainer.train(
         train_loader=train_loader,
         val_loader=val_loader,
-        num_epochs=50,
+        num_epochs=40,
         learning_rate=0.001
     )
     
