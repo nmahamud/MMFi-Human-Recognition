@@ -201,46 +201,122 @@ def main():
     """Example usage."""
     import sys
     
-    if len(sys.argv) < 2:
-        print("Usage: python inference.py <path_to_data_directory> [model_path] [config_path]")
-        print("\nExamples:")
-        print("  python inference.py mmwave")
-        print("  python inference.py mmwave best_model.pth model_config.json")
-        print("  python inference.py mmwave demo_model.pth demo_config.json")
-        return
+    # ==========================================
+    # CONFIGURATION
+    # ==========================================
+    # Base path to data (same as in train.py)
+    base_path = Path('t:/Niki/Documents/School')
     
-    data_path = sys.argv[1]
+    # Model configuration
+    model_file = 'best_model.pth'
+    config_file = 'model_config.json'
+    
+    # Select a specific sample to test (or None to pick first found)
+    # Set to None to scan for the first available sample
+    # or set like: target_sample = ('E01', 'S01', 'A01') 
+    target_sample = None 
+    # ==========================================
+    
+    # Determine data path
+    data_path = None
+    
+    if len(sys.argv) > 1:
+        # Use command line argument if provided
+        data_path = sys.argv[1]
+        if len(sys.argv) > 2:
+            model_file = sys.argv[2]
+        if len(sys.argv) > 3:
+            config_file = sys.argv[3]
+    else:
+        # Use configuration from file
+        print(f"No arguments provided. Using base path: {base_path}")
+        
+        if target_sample:
+            # Construct path from target sample
+            episode, session, action = target_sample
+            # Try different depths depending on folder structure
+            # Structure from train.py: base_path / E.. / S.. / A.. / mmwave
+            potential_path = base_path / episode / session / action / 'mmwave'
+            if potential_path.exists():
+                data_path = str(potential_path)
+            else:
+                # Try without mmwave subdir
+                potential_path = base_path / episode / session / action
+                if potential_path.exists():
+                    data_path = str(potential_path)
+        else:
+            # Scan for first available sample
+            print("Scanning for available samples...")
+            found = False
+            # Look for E*/S*/A* structure
+            for episode_dir in sorted(base_path.glob('E*')):
+                if not episode_dir.is_dir(): continue
+                for session_dir in sorted(episode_dir.glob('S*')):
+                    if not session_dir.is_dir(): continue
+                    for action_dir in sorted(session_dir.glob('A*')):
+                        if not action_dir.is_dir(): continue
+                        
+                        # Check for mmwave subdir
+                        mmwave_dir = action_dir / 'mmwave'
+                        if mmwave_dir.exists() and any(mmwave_dir.glob('frame*.bin')):
+                            data_path = str(mmwave_dir)
+                            found = True
+                            break
+                        
+                        # Check if action_dir itself contains frames
+                        if any(action_dir.glob('frame*.bin')):
+                            data_path = str(action_dir)
+                            found = True
+                            break
+                    if found: break
+                if found: break
+    
+    if not data_path:
+        print("Usage: python inference.py <path_to_data_directory> [model_path] [config_path]")
+        print("\nOr configure 'base_path' in the script.")
+        print(f"Could not find any valid data in {base_path}")
+        return
     
     if not Path(data_path).exists():
         print(f"Error: Path {data_path} does not exist!")
         return
     
     # Check for model files
-    model_path = sys.argv[2] if len(sys.argv) > 2 else None
-    config_path = sys.argv[3] if len(sys.argv) > 3 else None
-    
-    # Auto-detect available model files
-    if model_path is None:
-        if Path('best_model.pth').exists():
-            model_path = 'best_model.pth'
-            config_path = 'model_config.json'
+    if not Path(model_file).exists():
+        # Try to find it in the same directory as the script
+        script_dir = Path(__file__).parent
+        if (script_dir / model_file).exists():
+            model_file = str(script_dir / model_file)
+            config_file = str(script_dir / config_file)
         elif Path('demo_model.pth').exists():
-            model_path = 'demo_model.pth'
-            config_path = 'demo_config.json'
+            print("Model not found, falling back to demo model...")
+            model_file = 'demo_model.pth'
+            config_file = 'demo_config.json'
         else:
-            print("Error: No model files found!")
+            print(f"Error: Model file {model_file} not found!")
             print("Please train a model first using: python train.py")
-            print("Or run the demo: python demo_single_sample.py")
             return
+            
+    model_path = model_file
+    config_path = config_file
     
     print(f"Loading model from: {model_path}")
     print(f"Loading config from: {config_path}")
     
+    # Set class file paths
+    if 'best_model.pth' in model_path or 'final_model.pth' in model_path:
+        person_classes_path = 'person_encoder_classes.npy'
+        action_classes_path = 'action_encoder_classes.npy'
+    else:
+        # Fallback for other naming conventions (like demo_model.pth -> demo_person_classes.npy)
+        person_classes_path = model_path.replace('_model.pth', '_person_classes.npy')
+        action_classes_path = model_path.replace('_model.pth', '_action_classes.npy')
+
     predictor = MMWavePredictor(
         model_path=model_path,
         config_path=config_path,
-        person_classes_path=model_path.replace('_model.pth', '_person_classes.npy'),
-        action_classes_path=model_path.replace('_model.pth', '_action_classes.npy')
+        person_classes_path=person_classes_path,
+        action_classes_path=action_classes_path
     )
     
     print(f"\nMaking prediction on: {data_path}")
@@ -261,6 +337,50 @@ def main():
     print("\nAll action probabilities:")
     for label, prob in results['action']['all_probabilities'].items():
         print(f"  {label}: {prob*100:.2f}%")
+    
+    # Save results to file
+    output_file = 'prediction_results.json'
+    
+    # Add metadata to results
+    results['data_path'] = data_path
+    results['model_path'] = model_path
+    
+    # Convert numpy types to native python types for JSON serialization
+    def convert_to_serializable(obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return obj
+    
+    with open(output_file, 'w') as f:
+        json.dump(results, f, indent=2, default=convert_to_serializable)
+    
+    print(f"\nResults saved to: {output_file}")
+    
+    # Also save a readable text report
+    report_file = 'prediction_report.txt'
+    with open(report_file, 'w') as f:
+        f.write("="*60 + "\n")
+        f.write(f"PREDICTION RESULTS (Source: {data_path})\n")
+        f.write("="*60 + "\n\n")
+        
+        f.write(f"Person: {results['person']['label']}\n")
+        f.write(f"Confidence: {results['person']['confidence']*100:.2f}%\n")
+        f.write("\nAll person probabilities:\n")
+        for label, prob in results['person']['all_probabilities'].items():
+            f.write(f"  {label}: {prob*100:.2f}%\n")
+        
+        f.write(f"\nAction: {results['action']['label']}\n")
+        f.write(f"Confidence: {results['action']['confidence']*100:.2f}%\n")
+        f.write("\nAll action probabilities:\n")
+        for label, prob in results['action']['all_probabilities'].items():
+            f.write(f"  {label}: {prob*100:.2f}%\n")
+        f.write("\n" + "="*60 + "\n")
+        
+    print(f"Report saved to: {report_file}")
     
     print("\n" + "="*60)
 
