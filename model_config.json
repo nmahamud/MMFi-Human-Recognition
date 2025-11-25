@@ -1,5 +1,5 @@
 {
-  "num_persons": 4,
+  "num_persons": 40,
   "num_actions": 27,
   "input_features": 4,
   "hidden_dim": 512,

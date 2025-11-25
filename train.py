@@ -366,8 +366,8 @@ def main():
         if isinstance(first_col, str) and first_col.startswith('E'):
             parts = first_col.split(',')
             if len(parts) >= 4:
-                episode, session, action = parts[0], parts[1], parts[2]
-                key = f'{episode}_{session}_{action}'
+                episode, subject, action = parts[0], parts[1], parts[2]
+                key = f'{episode}_{subject}_{action}'
                 
                 # Extract frame segments from remaining columns
                 segments = []
@@ -390,7 +390,7 @@ def main():
         # Extract labels from path structure
         parts = episode_dir.parts
         episode = parts[-3]  # E01, E02, etc.
-        session = parts[-2]   # S01, S02, etc.
+        subject = parts[-2]   # S01, S02, etc.
         action = parts[-1]    # A01, A02, etc.
         
         # Skip if action is not in target list (only if target_actions is not empty)
@@ -400,7 +400,7 @@ def main():
         # Check if directory contains frame*.bin files in mmwave subdirectory
         mmwave_dir = episode_dir / 'mmwave'
         if mmwave_dir.exists() and any(mmwave_dir.glob('frame*.bin')):
-            key = f'{episode}_{session}_{action}'
+            key = f'{episode}_{subject}_{action}'
             
             # Get frame segments for this action from CSV
             if key in segments_map:
@@ -408,13 +408,13 @@ def main():
                 # Each segment becomes a different instance but loads the full action
                 for segment in segments_map[key]:
                     data_dirs.append(str(mmwave_dir))
-                    person_labels.append(session)  # Use session (Student) as person identifier
+                    person_labels.append(subject)  # Use subject (Student) as person identifier
                     action_labels.append(action)
-                    frame_segments.append(None)  # Don't use frame segmentation
+                    frame_segments.append(segment)  # Use the specific frame segment
             else:
                 # If not in CSV, treat entire action folder as one sample
                 data_dirs.append(str(mmwave_dir))
-                person_labels.append(session)
+                person_labels.append(subject)
                 action_labels.append(action)
                 frame_segments.append(None)  # No specific segment
     
