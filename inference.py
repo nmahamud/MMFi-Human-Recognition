@@ -1,5 +1,14 @@
 """
 Inference script for mmWave human activity and person recognition.
+
+Example Command Line Usage:
+---------------------------
+1. Auto-detect sample:
+   python inference.py
+
+2. Specify a data folder:
+   python inference.py "t:/Niki/Documents/School/E01/S01/A01/mmwave"
+
 """
 
 import numpy as np
@@ -233,15 +242,15 @@ def main():
         
         if target_sample:
             # Construct path from target sample
-            episode, session, action = target_sample
+            episode, subject, action = target_sample
             # Try different depths depending on folder structure
             # Structure from train.py: base_path / E.. / S.. / A.. / mmwave
-            potential_path = base_path / episode / session / action / 'mmwave'
+            potential_path = base_path / episode / subject / action / 'mmwave'
             if potential_path.exists():
                 data_path = str(potential_path)
             else:
                 # Try without mmwave subdir
-                potential_path = base_path / episode / session / action
+                potential_path = base_path / episode / subject / action
                 if potential_path.exists():
                     data_path = str(potential_path)
         else:
@@ -251,9 +260,9 @@ def main():
             # Look for E*/S*/A* structure
             for episode_dir in sorted(base_path.glob('E*')):
                 if not episode_dir.is_dir(): continue
-                for session_dir in sorted(episode_dir.glob('S*')):
-                    if not session_dir.is_dir(): continue
-                    for action_dir in sorted(session_dir.glob('A*')):
+                for subject_dir in sorted(episode_dir.glob('S*')):
+                    if not subject_dir.is_dir(): continue
+                    for action_dir in sorted(subject_dir.glob('A*')):
                         if not action_dir.is_dir(): continue
                         
                         # Check for mmwave subdir
@@ -320,19 +329,54 @@ def main():
     )
     
     print(f"\nMaking prediction on: {data_path}")
+    
+    # Extract ground truth from path if possible
+    gt_person = None
+    gt_action = None
+    path_parts = Path(data_path).parts
+    
+    # Look for pattern E../S../A..
+    for i in range(len(path_parts)):
+        part = path_parts[i]
+        if part.startswith('E') and part[1:].isdigit():
+            # Found Episode
+            if i+2 < len(path_parts):
+                possible_subject = path_parts[i+1]
+                possible_action = path_parts[i+2]
+                
+                if (possible_subject.startswith('S') and possible_subject[1:].isdigit() and
+                    possible_action.startswith('A') and possible_action[1:].isdigit()):
+                    
+                    # In the updated train.py, we use Subject (Sxx) as the person ID
+                    # and Action (Axx) as the action ID
+                    gt_person = possible_subject
+                    gt_action = possible_action
+                    print(f"Ground Truth (from path): Person={gt_person}, Action={gt_action}")
+                    break
+
     results = predictor.predict(data_path)
     
     print("\n" + "="*60)
     print("PREDICTION RESULTS")
     print("="*60)
     
-    print(f"\nPerson: {results['person']['label']}")
+    # Person Result
+    is_person_correct = ""
+    if gt_person:
+        is_person_correct = " [CORRECT]" if results['person']['label'] == gt_person else f" [WRONG, expected {gt_person}]"
+    
+    print(f"\nPerson: {results['person']['label']}{is_person_correct}")
     print(f"Confidence: {results['person']['confidence']*100:.2f}%")
     print("\nAll person probabilities:")
     for label, prob in results['person']['all_probabilities'].items():
         print(f"  {label}: {prob*100:.2f}%")
     
-    print(f"\nAction: {results['action']['label']}")
+    # Action Result
+    is_action_correct = ""
+    if gt_action:
+        is_action_correct = " [CORRECT]" if results['action']['label'] == gt_action else f" [WRONG, expected {gt_action}]"
+        
+    print(f"\nAction: {results['action']['label']}{is_action_correct}")
     print(f"Confidence: {results['action']['confidence']*100:.2f}%")
     print("\nAll action probabilities:")
     for label, prob in results['action']['all_probabilities'].items():
