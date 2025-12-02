@@ -24,14 +24,19 @@ from model import MMWavePointNet, MMWave3DCNN
 class MMWaveTorchDataset(Dataset):
     """PyTorch Dataset wrapper for mmWave data."""
     
-    def __init__(self, data_structure, max_frames=None, max_points=None, preload=True, device='cpu'):
+    def __init__(self, data_structure, max_frames=None, max_points=None, preload=True, device='cpu', 
+                 normalize=True, norm_means=None, norm_stds=None):
         self.data_structure = data_structure
-        self.loader = MMWaveDataLoader(".")
+        self.loader = MMWaveDataLoader(".", normalize=normalize)
         self.max_frames = max_frames
         self.max_points = max_points
         self.preload = preload
         self.device = device
         self.cache = {}
+        
+        # Set normalization statistics if provided
+        if norm_means is not None and norm_stds is not None:
+            self.loader.set_normalization_stats(norm_means, norm_stds)
         
         # Preload all data if requested
         if preload:
@@ -428,6 +433,17 @@ def main():
     for i, (path, seg) in enumerate(zip(data_dirs[:3], frame_segments[:3])):  # Show first 3
         print(f"  {i}: {path} | Segment: {seg}")
     
+    # Compute normalization statistics from the data
+    print("\nComputing normalization statistics...")
+    temp_loader = MMWaveDataLoader(".", normalize=False)
+    unique_dirs = list(set(data_dirs))  # Get unique directories
+    norm_means, norm_stds = temp_loader.compute_normalization_stats(unique_dirs, max_samples=2000)
+    
+    # Save normalization stats for inference
+    np.save('norm_means.npy', norm_means)
+    np.save('norm_stds.npy', norm_stds)
+    print(f"Saved normalization statistics to norm_means.npy and norm_stds.npy")
+    
     data_structure, person_encoder, action_encoder = prepare_dataset(
         data_dirs, person_labels, action_labels, frame_segments
     )
@@ -458,8 +474,11 @@ def main():
     
     # Create datasets
     # Use 128 frames for good balance between computation and I/O
-    train_dataset = MMWaveTorchDataset(train_data, max_frames=128, max_points=150, preload=False, device='cpu')
-    val_dataset = MMWaveTorchDataset(val_data, max_frames=128, max_points=150, preload=False, device='cpu')
+    # Pass normalization statistics to ensure consistent normalization
+    train_dataset = MMWaveTorchDataset(train_data, max_frames=128, max_points=150, preload=False, device='cpu',
+                                        normalize=True, norm_means=norm_means, norm_stds=norm_stds)
+    val_dataset = MMWaveTorchDataset(val_data, max_frames=128, max_points=150, preload=False, device='cpu',
+                                      normalize=True, norm_means=norm_means, norm_stds=norm_stds)
     
     # Debug: Check a sample
     print("\nDebug: Checking first sample...")

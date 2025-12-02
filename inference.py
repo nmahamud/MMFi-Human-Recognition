@@ -26,6 +26,8 @@ class MMWavePredictor:
     def __init__(self, model_path='best_model.pth', config_path='model_config.json',
                  person_classes_path='person_encoder_classes.npy',
                  action_classes_path='action_encoder_classes.npy',
+                 norm_means_path='norm_means.npy',
+                 norm_stds_path='norm_stds.npy',
                  device=None):
         """
         Initialize the predictor.
@@ -35,6 +37,8 @@ class MMWavePredictor:
             config_path: Path to model configuration
             person_classes_path: Path to person label encoder classes
             action_classes_path: Path to action label encoder classes
+            norm_means_path: Path to normalization means
+            norm_stds_path: Path to normalization stds
             device: Device to use (cuda/cpu)
         """
         # Set device
@@ -64,8 +68,18 @@ class MMWavePredictor:
         self.model.to(self.device)
         self.model.eval()
         
-        # Data loader
-        self.loader = MMWaveDataLoader(".")
+        # Data loader with normalization
+        self.loader = MMWaveDataLoader(".", normalize=True)
+        
+        # Load normalization statistics if available
+        if Path(norm_means_path).exists() and Path(norm_stds_path).exists():
+            norm_means = np.load(norm_means_path)
+            norm_stds = np.load(norm_stds_path)
+            self.loader.set_normalization_stats(norm_means, norm_stds)
+            print(f"Loaded normalization stats: means={norm_means}, stds={norm_stds}")
+        else:
+            print(f"Warning: Normalization files not found. Using default normalization.")
+            print(f"  Expected: {norm_means_path}, {norm_stds_path}")
         
         print(f"Model loaded successfully!")
         print(f"Persons: {list(self.person_classes)}")
