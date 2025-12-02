@@ -13,14 +13,100 @@ import struct
 class MMWaveDataLoader:
     """Load and preprocess mmWave radar data from binary files."""
     
-    def __init__(self, data_root: str):
+    def __init__(self, data_root: str, normalize: bool = True):
         """
         Initialize the data loader.
         
         Args:
             data_root: Root directory containing mmWave data
+            normalize: Whether to normalize point cloud features
         """
         self.data_root = Path(data_root)
+        self.normalize = normalize
+        
+        # Normalization statistics (can be computed from data or use defaults)
+        # These are reasonable defaults for mmWave radar data in meters
+        # You can update these after running compute_normalization_stats()
+        self.feature_means = np.array([0.0, 0.0, 0.0, 0.0])  # x, y, z, intensity
+        self.feature_stds = np.array([1.0, 1.0, 1.0, 1.0])   # will be updated
+        self.stats_computed = False
+    
+    def compute_normalization_stats(self, frame_dirs: list, max_samples: int = 1000):
+        """
+        Compute normalization statistics from a sample of the dataset.
+        
+        Args:
+            frame_dirs: List of directories containing frame*.bin files
+            max_samples: Maximum number of frames to sample for statistics
+        """
+        all_points = []
+        sample_count = 0
+        
+        for frame_dir in frame_dirs:
+            frame_dir = Path(frame_dir)
+            frame_files = sorted(frame_dir.glob('frame*.bin'))
+            
+            for frame_file in frame_files:
+                if sample_count >= max_samples:
+                    break
+                    
+                # Load without normalization for stats computation
+                old_normalize = self.normalize
+                self.normalize = False
+                points = self.load_frame(str(frame_file))
+                self.normalize = old_normalize
+                
+                if len(points) > 0:
+                    all_points.append(points)
+                    sample_count += 1
+            
+            if sample_count >= max_samples:
+                break
+        
+        if all_points:
+            all_points = np.vstack(all_points)
+            self.feature_means = np.mean(all_points, axis=0)
+            self.feature_stds = np.std(all_points, axis=0)
+            # Avoid division by zero
+            self.feature_stds = np.where(self.feature_stds < 1e-6, 1.0, self.feature_stds)
+            self.stats_computed = True
+            
+            print(f"Normalization statistics computed from {sample_count} frames:")
+            print(f"  Means: {self.feature_means}")
+            print(f"  Stds:  {self.feature_stds}")
+        
+        return self.feature_means, self.feature_stds
+    
+    def set_normalization_stats(self, means: np.ndarray, stds: np.ndarray):
+        """
+        Manually set normalization statistics.
+        
+        Args:
+            means: Mean values for each feature [x, y, z, intensity]
+            stds: Standard deviation for each feature
+        """
+        self.feature_means = np.array(means)
+        self.feature_stds = np.array(stds)
+        self.feature_stds = np.where(self.feature_stds < 1e-6, 1.0, self.feature_stds)
+        self.stats_computed = True
+    
+    def normalize_points(self, points: np.ndarray) -> np.ndarray:
+        """
+        Normalize point cloud features to zero mean and unit variance.
+        
+        Args:
+            points: Point cloud data (num_points, features)
+            
+        Returns:
+            Normalized points
+        """
+        if len(points) == 0:
+            return points
+        
+        # Apply z-score normalization: (x - mean) / std
+        normalized = (points - self.feature_means) / self.feature_stds
+        
+        return normalized
         
     def load_frame(self, frame_path: str) -> np.ndarray:
         """
@@ -81,6 +167,10 @@ class MMWaveDataLoader:
             
             # Replace NaN and Inf values with 0
             points = np.nan_to_num(points, nan=0.0, posinf=0.0, neginf=0.0)
+            
+            # Apply normalization if enabled
+            if self.normalize and len(points) > 0:
+                points = self.normalize_points(points)
             
             return points
             
