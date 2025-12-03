@@ -1,564 +1,479 @@
 """
-Training script for mmWave human activity and person recognition.
+Action-only training for MMFi mmWave segments.
+
+Model: PointNet (per-frame) -> Temporal ConvNet (dilated) -> Masked attention pooling -> Action head
+Data:  Uses CSV-defined segments only; subject-wise session split; per-environment ZMUV (train-only stats)
 """
 
-import os
-import time
+from __future__ import annotations
+from pathlib import Path
+from dataclasses import dataclass
+from typing import Dict, List, Tuple
+import math
+import json
+import random
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-from pathlib import Path
-import json
-from tqdm import tqdm
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
+from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
-import pandas as pd
 
-from data_loader import MMWaveDataLoader, MMWaveDataset
-from model import MMWavePointNet, MMWave3DCNN
+from action_dataloader import (
+    build_segment_index_from_csv,
+    build_action_map,
+    ActionSegmentDataset,
+    _list_frames,
+    _read_frame_bin,
+)
 
-
-class MMWaveTorchDataset(Dataset):
-    """PyTorch Dataset wrapper for mmWave data."""
-    
-    def __init__(self, data_structure, max_frames=None, max_points=None, preload=True, device='cpu', 
-                 normalize=True, norm_means=None, norm_stds=None):
-        self.data_structure = data_structure
-        self.loader = MMWaveDataLoader(".", normalize=normalize)
-        self.max_frames = max_frames
-        self.max_points = max_points
-        self.preload = preload
-        self.device = device
-        self.cache = {}
-        
-        # Set normalization statistics if provided
-        if norm_means is not None and norm_stds is not None:
-            self.loader.set_normalization_stats(norm_means, norm_stds)
-        
-        # Preload all data if requested
-        if preload:
-            print("Preloading dataset into memory...")
-            for idx in tqdm(range(len(data_structure)), desc="Preloading"):
-                self._load_and_cache(idx)
-        
-    def _load_and_cache(self, idx):
-        """Load sequence and cache it."""
-        if idx in self.cache:
-            return
-        
-        sample = self.data_structure[idx]
-        sequence = self.loader.load_sequence(sample['path'], frame_segment=sample.get('frame_segment'))
-        
-        # Limit frames and points if specified
-        if self.max_frames and sequence.shape[0] > self.max_frames:
-            sequence = sequence[:self.max_frames]
-        if self.max_points and sequence.shape[1] > self.max_points:
-            sequence = sequence[:, :self.max_points]
-        
-        # Pad frames if needed
-        if self.max_frames and sequence.shape[0] < self.max_frames:
-            padding = np.zeros((self.max_frames - sequence.shape[0], 
-                              sequence.shape[1], sequence.shape[2]))
-            sequence = np.vstack([sequence, padding])
-        
-        # Pad points if needed
-        if self.max_points and sequence.shape[1] < self.max_points:
-            padding = np.zeros((sequence.shape[0], 
-                              self.max_points - sequence.shape[1], 
-                              sequence.shape[2]))
-            sequence = np.concatenate([sequence, padding], axis=1)
-        
-        self.cache[idx] = {
-            'sequence': torch.FloatTensor(sequence),
-            'person_id': sample['person_id'],
-            'action_id': sample['action_id']
-        }
-        
-    def __len__(self):
-        return len(self.data_structure)
-    
-    def __getitem__(self, idx):
-        if self.preload:
-            return self.cache[idx]
-        
-        sample = self.data_structure[idx]
-        sequence = self.loader.load_sequence(sample['path'], frame_segment=sample.get('frame_segment'))
-        
-        # Limit frames and points if specified
-        if self.max_frames and sequence.shape[0] > self.max_frames:
-            sequence = sequence[:self.max_frames]
-        if self.max_points and sequence.shape[1] > self.max_points:
-            sequence = sequence[:, :self.max_points]
-        
-        # Pad frames if needed
-        if self.max_frames and sequence.shape[0] < self.max_frames:
-            padding = np.zeros((self.max_frames - sequence.shape[0], 
-                              sequence.shape[1], sequence.shape[2]))
-            sequence = np.vstack([sequence, padding])
-        
-        # Pad points if needed
-        if self.max_points and sequence.shape[1] < self.max_points:
-            padding = np.zeros((sequence.shape[0], 
-                              self.max_points - sequence.shape[1], 
-                              sequence.shape[2]))
-            sequence = np.concatenate([sequence, padding], axis=1)
-        
-        return {
-            'sequence': torch.FloatTensor(sequence),
-            'person_id': sample['person_id'],
-            'action_id': sample['action_id']
-        }
+from model import ActionNet_PointNet_TCN
 
 
-def collate_fn(batch):
-    """Custom collate function for batching - minimal CPU work."""
-    sequences = torch.stack([item['sequence'] for item in batch])
-    person_ids = torch.LongTensor([item['person_id'] for item in batch])
-    action_ids = torch.LongTensor([item['action_id'] for item in batch])
-    
-    return {
-        'sequence': sequences,
-        'person_id': person_ids,
-        'action_id': action_ids
-    }
+# -----------------------------
+# Config
+# -----------------------------
+@dataclass
+class Config:
+    root: Path
+    csv_path: Path
+    outdir: Path = Path("./outputs_action")
+    seed: int = 42
+
+    # dataset
+    min_len: int = 11
+    verify_files: bool = True
+    accept_mmwave_subdir: bool = True
+    max_frames: int = 31       # center-padded to this T
+    max_points: int = 150
+    normalize: str = "per_env_zmuv"
+
+    # split
+    train_ratio: float = 0.8
+    balance_by_action: bool = True
+
+    # training
+    batch_size: int = 64
+    epochs: int = 50
+    lr: float = 1e-3
+    weight_decay: float = 3e-4
+    label_smoothing: float = 0.1
+    grad_clip: float = 1.0
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    pin_memory: bool = True
+    num_workers: int = 0  # Colab/Windows friendly
+
+    # model
+    input_features: int = 4
+    frame_dim: int = 256
+    tcn_layers: int = 3
+    tcn_dropout: float = 0.2
+    kernel: int = 3
+
+    # augs (train dataset)
+    yaw_deg: float = 8.0
+    point_jitter: float = 0.02
+    drop_point: float = 0.05
+    drop_frame: float = 0.10
+
+    # early stopping
+    patience: int = 8
 
 
-class Trainer:
-    """Training manager for mmWave recognition models."""
-    
-    def __init__(self, model, device='cuda' if torch.cuda.is_available() else 'cpu'):
-        self.model = model.to(device)
-        self.device = device
-        self.history = {
-            'train_loss': [],
-            'val_loss': [],
-            'train_person_acc': [],
-            'val_person_acc': [],
-            'train_action_acc': [],
-            'val_action_acc': []
-        }
-    
-    def train_epoch(self, dataloader, optimizer, criterion_person, criterion_action):
-        """Train for one epoch."""
-        import time
-        self.model.train()
-        total_loss = 0
-        correct_person = 0
-        correct_action = 0
-        total_samples = 0
-        
-        pbar = tqdm(dataloader, desc='Training')
-        for batch_idx, batch in enumerate(pbar):
-            # Time the data transfer
-            sequences = batch['sequence'].to(self.device)
-            person_labels = batch['person_id'].to(self.device)
-            action_labels = batch['action_id'].to(self.device)
-            torch.cuda.synchronize()  # Ensure transfer is complete
-            
-            optimizer.zero_grad()
-            
-            # Forward pass
-            person_logits, action_logits = self.model(sequences)
-            
-            # Compute losses
-            loss_person = criterion_person(person_logits, person_labels)
-            loss_action = criterion_action(action_logits, action_labels)
-            loss = loss_person + loss_action
-            
-            # Backward pass
-            loss.backward()
-            optimizer.step()
-            torch.cuda.synchronize()
-            
-            # Statistics
-            total_loss += loss.item()
-            _, person_pred = person_logits.max(1)
-            _, action_pred = action_logits.max(1)
-            correct_person += person_pred.eq(person_labels).sum().item()
-            correct_action += action_pred.eq(action_labels).sum().item()
-            total_samples += sequences.size(0)
-            
-            pbar.set_postfix({
-                'loss': f'{loss.item():.4f}',
-                'person_acc': f'{100.*correct_person/total_samples:.2f}%',
-                'action_acc': f'{100.*correct_action/total_samples:.2f}%'
-            })
-        
-        avg_loss = total_loss / len(dataloader)
-        person_acc = 100. * correct_person / total_samples
-        action_acc = 100. * correct_action / total_samples
-        
-        return avg_loss, person_acc, action_acc
-    
-    def validate(self, dataloader, criterion_person, criterion_action):
-        """Validate the model."""
-        self.model.eval()
-        total_loss = 0
-        correct_person = 0
-        correct_action = 0
-        total_samples = 0
-        
-        with torch.no_grad():
-            for batch in tqdm(dataloader, desc='Validation'):
-                sequences = batch['sequence'].to(self.device)
-                person_labels = batch['person_id'].to(self.device)
-                action_labels = batch['action_id'].to(self.device)
-                
-                # Forward pass
-                person_logits, action_logits = self.model(sequences)
-                
-                # Compute losses
-                loss_person = criterion_person(person_logits, person_labels)
-                loss_action = criterion_action(action_logits, action_labels)
-                loss = loss_person + loss_action
-                
-                # Statistics
-                total_loss += loss.item()
-                _, person_pred = person_logits.max(1)
-                _, action_pred = action_logits.max(1)
-                correct_person += person_pred.eq(person_labels).sum().item()
-                correct_action += action_pred.eq(action_labels).sum().item()
-                total_samples += sequences.size(0)
-        
-        avg_loss = total_loss / len(dataloader)
-        person_acc = 100. * correct_person / total_samples
-        action_acc = 100. * correct_action / total_samples
-        
-        return avg_loss, person_acc, action_acc
-    
-    def train(self, train_loader, val_loader, num_epochs, learning_rate=0.001):
-        """Full training loop."""
-        criterion_person = nn.CrossEntropyLoss()
-        criterion_action = nn.CrossEntropyLoss()
-        optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', 
-                                                         factor=0.5, patience=5)
-        
-        best_val_loss = float('inf')
-        
-        for epoch in range(num_epochs):
-            print(f"\nEpoch {epoch+1}/{num_epochs}")
-            start_time = time.time()
-            
-            # Train
-            train_loss, train_person_acc, train_action_acc = self.train_epoch(
-                train_loader, optimizer, criterion_person, criterion_action
-            )
-            
-            # Validate
-            val_loss, val_person_acc, val_action_acc = self.validate(
-                val_loader, criterion_person, criterion_action
-            )
-            
-            # Update history
-            self.history['train_loss'].append(train_loss)
-            self.history['val_loss'].append(val_loss)
-            self.history['train_person_acc'].append(train_person_acc)
-            self.history['val_person_acc'].append(val_person_acc)
-            self.history['train_action_acc'].append(train_action_acc)
-            self.history['val_action_acc'].append(val_action_acc)
-            
-            # Learning rate scheduling
-            scheduler.step(val_loss)
-            
-            # Print epoch summary
-            duration = time.time() - start_time
-            print(f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
-            print(f"Train Person Acc: {train_person_acc:.2f}% | Val Person Acc: {val_person_acc:.2f}%")
-            print(f"Train Action Acc: {train_action_acc:.2f}% | Val Action Acc: {val_action_acc:.2f}%")
-            print(f"Epoch Duration: {duration:.2f}s")
-            
-            # Save best model
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                torch.save(self.model.state_dict(), 'best_model.pth')
-                print("Saved best model!")
-        
-        return self.history
-    
-    def plot_history(self, save_path='training_history.png'):
-        """Plot training history."""
-        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-        
-        # Loss
-        axes[0].plot(self.history['train_loss'], label='Train')
-        axes[0].plot(self.history['val_loss'], label='Validation')
-        axes[0].set_xlabel('Epoch')
-        axes[0].set_ylabel('Loss')
-        axes[0].set_title('Training and Validation Loss')
-        axes[0].legend()
-        axes[0].grid(True)
-        
-        # Person accuracy
-        axes[1].plot(self.history['train_person_acc'], label='Train')
-        axes[1].plot(self.history['val_person_acc'], label='Validation')
-        axes[1].set_xlabel('Epoch')
-        axes[1].set_ylabel('Accuracy (%)')
-        axes[1].set_title('Person Recognition Accuracy')
-        axes[1].legend()
-        axes[1].grid(True)
-        
-        # Action accuracy
-        axes[2].plot(self.history['train_action_acc'], label='Train')
-        axes[2].plot(self.history['val_action_acc'], label='Validation')
-        axes[2].set_xlabel('Epoch')
-        axes[2].set_ylabel('Accuracy (%)')
-        axes[2].set_title('Action Recognition Accuracy')
-        axes[2].legend()
-        axes[2].grid(True)
-        
-        plt.tight_layout()
-        plt.savefig(save_path)
-        print(f"Training history plot saved to {save_path}")
+# -----------------------------
+# Utils
+# -----------------------------
+def set_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 
-def prepare_dataset(data_dirs, person_labels, action_labels, frame_segments=None):
+def group_sessions(index: List[Dict]) -> Dict[Tuple[str, str, str, str], Dict]:
+    groups: Dict[Tuple[str,str,str,str], Dict] = {}
+    for i, row in enumerate(index):
+        key = (row["env"], row["subject"], row["action"], row["session_dir"])
+        g = groups.setdefault(key, {"rows": [], "n_segments": 0})
+        g["rows"].append(i)
+        g["n_segments"] += 1
+    return groups
+
+
+def per_subject_sessions(index: List[Dict]) -> Dict[str, List[Tuple[Tuple[str,str,str,str], Dict]]]:
+    sessions = group_sessions(index)
+    by_subj: Dict[str, List[Tuple[Tuple[str,str,str,str], Dict]]] = {}
+    for key, info in sessions.items():
+        _, subj, _, _ = key
+        by_subj.setdefault(subj, []).append((key, info))
+    return by_subj
+
+
+def stratified_subject_split(
+    index: List[Dict],
+    train_ratio: float = 0.8,
+    balance_by_action: bool = True,
+    seed: int = 42
+) -> Tuple[List[int], List[int]]:
     """
-    Prepare dataset structure from directories.
-    
-    Args:
-        data_dirs: List of paths to directories containing frame*.bin files
-        person_labels: List of person labels
-        action_labels: List of action labels
-        frame_segments: List of frame segment strings (e.g., '1-7', '8-15') or None
-    
-    Returns:
-        data_structure, person_encoder, action_encoder
+    Session-level split per subject to avoid leakage,
+    optionally preserving per-subject action proportions.
     """
-    # Encode labels
-    person_encoder = LabelEncoder()
-    action_encoder = LabelEncoder()
-    
-    person_ids = person_encoder.fit_transform(person_labels)
-    action_ids = action_encoder.fit_transform(action_labels)
-    
-    # Create data structure
-    data_structure = []
-    for i, path in enumerate(data_dirs):
-        data_structure.append({
-            'path': path,
-            'person_id': person_ids[i],
-            'action_id': action_ids[i],
-            'frame_segment': frame_segments[i] if frame_segments else None
-        })
-    
-    return data_structure, person_encoder, action_encoder
+    rng = random.Random(seed)
+    by_subj = per_subject_sessions(index)
 
+    train_rows: List[int] = []
+    val_rows: List[int] = []
 
-def main():
-    """Main training function."""
-    
-    # Specify which actions to include in training
-    #target_actions = {'A11', 'A13', 'A14', 'A17', 'A18'}
-    target_actions = {}
+    for subj, sess_list in by_subj.items():
+        action_to_sessions: Dict[str, List[Tuple[Tuple[str,str,str,str], Dict]]] = {}
+        total_segments = 0
+        for (key, info) in sess_list:
+            act = key[2]
+            action_to_sessions.setdefault(act, []).append((key, info))
+            total_segments += info["n_segments"]
 
-    # Scan data directories from your folder structure
-    # Define base path to your data folders (adjust this path as needed)
-    base_path = Path('t:/Niki/Documents/School')  # Change this to your data root
-    csv_path = base_path / 'MMFi_action_segments - MMFi_action_segments.csv'
-    
-    # Load CSV to get frame segment information
-    df = pd.read_csv(csv_path, header=None)
-    
-    # Parse CSV to build frame segment mapping
-    # Format: "E##,S##,A##,segments"
-    segments_map = {}
-    for idx, row in df.iterrows():
-        first_col = row[0]
-        if isinstance(first_col, str) and first_col.startswith('E'):
-            parts = first_col.split(',')
-            if len(parts) >= 4:
-                episode, subject, action = parts[0], parts[1], parts[2]
-                key = f'{episode}_{subject}_{action}'
-                
-                # Extract frame segments from remaining columns
-                segments = []
-                for col_idx in range(3, len(row)):
-                    if pd.notna(row[col_idx]):
-                        seg_str = str(row[col_idx]).strip()
-                        if seg_str and seg_str != '':
-                            segments.append(seg_str)
-                
-                segments_map[key] = segments
-    
-    # Collect all directories containing frame*.bin files
-    data_dirs = []
-    person_labels = []
-    action_labels = []
-    frame_segments = []
-    
-    # Scan for directories matching pattern E*/S*/A*/
-    for episode_dir in sorted(base_path.glob('E*/S*/A*')):
-        # Extract labels from path structure
-        parts = episode_dir.parts
-        episode = parts[-3]  # E01, E02, etc.
-        subject = parts[-2]   # S01, S02, etc.
-        action = parts[-1]    # A01, A02, etc.
-        
-        # Skip if action is not in target list (only if target_actions is not empty)
-        if target_actions and action not in target_actions:
-            continue
-        
-        # Check if directory contains frame*.bin files in mmwave subdirectory
-        mmwave_dir = episode_dir / 'mmwave'
-        if mmwave_dir.exists() and any(mmwave_dir.glob('frame*.bin')):
-            key = f'{episode}_{subject}_{action}'
-            
-            # Get frame segments for this action from CSV
-            if key in segments_map:
-                # Use full action (not individual segments) to preserve action context
-                # Each segment becomes a different instance but loads the full action
-                for segment in segments_map[key]:
-                    data_dirs.append(str(mmwave_dir))
-                    person_labels.append(subject)  # Use subject (Student) as person identifier
-                    action_labels.append(action)
-                    frame_segments.append(segment)  # Use the specific frame segment
+        for act in action_to_sessions:
+            rng.shuffle(action_to_sessions[act])
+
+        target_train_segments = math.ceil(train_ratio * total_segments)
+
+        session_to_rows: Dict[Tuple[str,str,str,str], List[int]] = {}
+        for (key, info) in sess_list:
+            session_to_rows[key] = info["rows"]
+
+        per_action_total = {act: sum(info["n_segments"] for _, info in action_to_sessions[act])
+                            for act in action_to_sessions}
+        per_action_target_train = {
+            act: round(train_ratio * per_action_total[act]) for act in per_action_total
+        }
+
+        action_queues = {act: list(action_to_sessions[act]) for act in action_to_sessions}
+
+        subj_train_rows: List[int] = []
+        subj_val_rows: List[int] = []
+
+        while len(subj_train_rows) < target_train_segments and any(action_queues.values()):
+            if balance_by_action:
+                current_train_counts: Dict[str,int] = {}
+                for ridx in subj_train_rows:
+                    a = index[ridx]["action"]
+                    current_train_counts[a] = current_train_counts.get(a, 0) + 1
+
+                deficits = []
+                for act in action_queues:
+                    if not action_queues[act]:
+                        continue
+                    deficit = per_action_target_train[act] - current_train_counts.get(act, 0)
+                    deficits.append((deficit, act))
+
+                if not deficits:
+                    break
+                deficits.sort(reverse=True, key=lambda x: x[0])
+                if deficits[0][0] > 0:
+                    chosen_act = deficits[0][1]
+                else:
+                    chosen_act = next((a for a in action_queues if action_queues[a]), None)
+                    if chosen_act is None:
+                        break
             else:
-                # If not in CSV, treat entire action folder as one sample
-                data_dirs.append(str(mmwave_dir))
-                person_labels.append(subject)
-                action_labels.append(action)
-                frame_segments.append(None)  # No specific segment
-    
-    if not data_dirs:
-        print(f"No data directories found at {base_path}")
-        print("Please ensure your data path is correct and contains frame*.bin files")
-        return
-    
-    print("Preparing dataset...")
-    print(f"Sample paths being loaded:")
-    for i, (path, seg) in enumerate(zip(data_dirs[:3], frame_segments[:3])):  # Show first 3
-        print(f"  {i}: {path} | Segment: {seg}")
-    
-    # Compute normalization statistics from the data
-    print("\nComputing normalization statistics...")
-    temp_loader = MMWaveDataLoader(".", normalize=False)
-    unique_dirs = list(set(data_dirs))  # Get unique directories
-    norm_means, norm_stds = temp_loader.compute_normalization_stats(unique_dirs, max_samples=2000)
-    
-    # Save normalization stats for inference
-    np.save('norm_means.npy', norm_means)
-    np.save('norm_stds.npy', norm_stds)
-    print(f"Saved normalization statistics to norm_means.npy and norm_stds.npy")
-    
-    data_structure, person_encoder, action_encoder = prepare_dataset(
-        data_dirs, person_labels, action_labels, frame_segments
+                non_empty = [a for a in action_queues if action_queues[a]]
+                if not non_empty:
+                    break
+                chosen_act = rng.choice(non_empty)
+
+            sess_key, sess_info = action_queues[chosen_act].pop(0)
+            rows = session_to_rows[sess_key]
+            subj_train_rows.extend(rows)
+            if len(subj_train_rows) >= target_train_segments:
+                break
+
+        chosen_train_session_keys = set()
+        for (key, info) in sess_list:
+            if any(r in subj_train_rows for r in info["rows"]):
+                chosen_train_session_keys.add(key)
+
+        for (key, info) in sess_list:
+            if key not in chosen_train_session_keys:
+                subj_val_rows.extend(info["rows"])
+
+        train_rows.extend(subj_train_rows)
+        val_rows.extend(subj_val_rows)
+
+    return train_rows, val_rows
+
+
+def compute_env_stats_from_index(
+    index: List[Dict],
+    sample_stride_frames: int = 3,
+    max_points_per_frame_for_stats: int = 512,
+) -> Dict[str, Dict[str, List[float]]]:
+    """
+    Compute per-environment mean/std over xyz from TRAIN ONLY.
+    Returns: { 'E01': {'mean':[mx,my,mz], 'std':[sx,sy,sz]}, ... }
+    """
+    env_sums   = {}
+    env_sumsq  = {}
+    env_counts = {}
+
+    for row in index:
+        env   = row["env"]
+        sdir  = Path(row["session_dir"])
+        start = int(row["start"])
+        end   = int(row["end"])
+
+        frame_map = _list_frames(sdir)
+        if not frame_map:
+            continue
+
+        fids = [f for f in range(start, end + 1) if f in frame_map]
+        fids = fids[::sample_stride_frames] if sample_stride_frames > 1 else fids
+        if not fids:
+            continue
+
+        for fid in fids:
+            arr = _read_frame_bin(frame_map[fid], target_feats=4)
+            if arr.size == 0:
+                continue
+            xyz = arr[:, :3]
+            if xyz.shape[0] > max_points_per_frame_for_stats:
+                idx = np.random.choice(xyz.shape[0], max_points_per_frame_for_stats, replace=False)
+                xyz = xyz[idx]
+
+            if env not in env_sums:
+                env_sums[env]   = np.zeros(3, dtype=np.float64)
+                env_sumsq[env]  = np.zeros(3, dtype=np.float64)
+                env_counts[env] = 0
+
+            env_sums[env]   += xyz.sum(axis=0, dtype=np.float64)
+            env_sumsq[env]  += (xyz * xyz).sum(axis=0, dtype=np.float64)
+            env_counts[env] += xyz.shape[0]
+
+    env_stats: Dict[str, Dict[str, List[float]]] = {}
+    for env in env_counts:
+        n   = max(int(env_counts[env]), 1)
+        sumv   = env_sums[env]
+        sumsq  = env_sumsq[env]
+        mean   = sumv / n
+        var    = np.maximum(sumsq / n - mean * mean, 0.0)
+        std    = np.sqrt(var + 1e-8)
+        env_stats[env] = {
+            "mean": mean.astype(np.float32).tolist(),
+            "std":  std.astype(np.float32).tolist(),
+        }
+    return env_stats
+
+
+def evaluate(model, loader, device, label_smoothing: float = 0.0):
+    model.eval()
+    total = 0
+    correct = 0
+    ce = nn.CrossEntropyLoss(reduction="sum", label_smoothing=label_smoothing)
+    loss_total = 0.0
+    with torch.no_grad():
+        for batch in loader:
+            x = batch["sequence"].to(device)      # (B,T,P,F)
+            y = batch["action_id"].to(device)
+            logits = model(x)
+            loss = ce(logits, y)
+            loss_total += loss.item()
+            total += x.size(0)
+            correct += (logits.argmax(1) == y).sum().item()
+    return (
+        loss_total / max(total, 1),
+        100.0 * correct / max(total, 1),
     )
-    
-    # Save label encoders
-    np.save('person_encoder_classes.npy', person_encoder.classes_)
-    np.save('action_encoder_classes.npy', action_encoder.classes_)
-    
-    print(f"Number of persons: {len(person_encoder.classes_)}")
-    print(f"Number of actions: {len(action_encoder.classes_)}")
-    print(f"Total samples: {len(data_structure)}")
-    print(f"Person classes: {person_encoder.classes_}")
-    print(f"Action classes: {action_encoder.classes_}")
-    
-    # For demonstration with single sample, we'll duplicate it
-    # In practice, you should have multiple samples for training
-    if len(data_structure) == 1:
-        print("\nWarning: Only one sample available. Duplicating for demonstration.")
-        print("Please add more data samples for proper training!")
-        data_structure = data_structure * 10  # Duplicate for demo
-    
-    # Split into train and validation
-    train_data, val_data = train_test_split(data_structure, test_size=0.2, 
-                                            random_state=42)
-    
-    print(f"Training samples: {len(train_data)}")
-    print(f"Validation samples: {len(val_data)}")
-    
-    # Create datasets
-    # Use 128 frames for good balance between computation and I/O
-    # Pass normalization statistics to ensure consistent normalization
-    train_dataset = MMWaveTorchDataset(train_data, max_frames=128, max_points=150, preload=False, device='cpu',
-                                        normalize=True, norm_means=norm_means, norm_stds=norm_stds)
-    val_dataset = MMWaveTorchDataset(val_data, max_frames=128, max_points=150, preload=False, device='cpu',
-                                      normalize=True, norm_means=norm_means, norm_stds=norm_stds)
-    
-    # Debug: Check a sample
-    print("\nDebug: Checking first sample...")
-    sample = train_dataset[0]
-    print(f"  Sample shape: {sample['sequence'].shape}")
-    print(f"  Sample min/max: {sample['sequence'].min():.4f} / {sample['sequence'].max():.4f}")
-    print(f"  Sample contains NaN: {torch.isnan(sample['sequence']).any()}")
-    print(f"  Person ID: {sample['person_id']}, Action ID: {sample['action_id']}")
-    
-    # Create dataloaders
-    # Windows doesn't support num_workers well, so use 0
-    # Use larger batch size to maximize GPU utilization
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, 
-                             collate_fn=collate_fn, num_workers=0, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False,
-                           collate_fn=collate_fn, num_workers=0, pin_memory=True)
-    
-    # Create model
-    num_persons = len(person_encoder.classes_)
-    num_actions = len(action_encoder.classes_)
-    
-    print("\nInitializing model...")
-    model = MMWavePointNet(
-        num_persons=num_persons,
+
+
+def plot_history(hist, outpath: Path):
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+    axes[0].plot(hist["train_loss"], label="Train")
+    axes[0].plot(hist["val_loss"], label="Val")
+    axes[0].set_title("Loss"); axes[0].set_xlabel("Epoch"); axes[0].grid(True); axes[0].legend()
+
+    axes[1].plot(hist["train_acc"], label="Train")
+    axes[1].plot(hist["val_acc"], label="Val")
+    axes[1].set_title("Action Accuracy"); axes[1].set_xlabel("Epoch"); axes[1].grid(True); axes[1].legend()
+
+    outpath.parent.mkdir(parents=True, exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(outpath)
+    print(f"[Saved] {outpath}")
+
+
+# -----------------------------
+# Main
+# -----------------------------
+def main():
+    cfg = Config(
+        root=Path("/content/mmfi_mmwave_data"),                        # <<< EDIT
+        csv_path=Path("/content/cleaned_compacted_mmwave_action_segment_manual.csv")  # <<< EDIT
+    )
+    set_seed(cfg.seed)
+    cfg.outdir.mkdir(parents=True, exist_ok=True)
+
+    # 1) Build index from CSV
+    index = build_segment_index_from_csv(
+        root=cfg.root,
+        csv_path=cfg.csv_path,
+        min_len=cfg.min_len,
+        verify_files=cfg.verify_files,
+        accept_mmwave_subdir=cfg.accept_mmwave_subdir,
+    )
+    if not index:
+        raise RuntimeError("No samples found. Check paths/CSV and min_len.")
+
+    # 2) Action encoder
+    act2id = build_action_map(index)
+    np.save(cfg.outdir / "action_encoder_classes.npy", np.array(list(act2id.keys())))
+    num_actions = len(act2id)
+    print(f"Actions: {num_actions} | Total samples: {len(index)}")
+
+    # 3) Subject-wise split (session-granular)
+    train_rows, val_rows = stratified_subject_split(
+        index, train_ratio=cfg.train_ratio, balance_by_action=cfg.balance_by_action, seed=cfg.seed
+    )
+
+    # 4) Per-environment stats from TRAIN only
+    train_index = [index[i] for i in train_rows]
+    env_stats = compute_env_stats_from_index(train_index)
+    with open(cfg.outdir / "env_stats.json", "w") as f:
+        json.dump(env_stats, f, indent=2)
+    print("Per-environment stats:", env_stats)
+
+    # 5) Datasets & loaders
+    train_ds = ActionSegmentDataset(
+        index=train_index,
+        action_to_id=act2id,
+        max_frames=cfg.max_frames, max_points=cfg.max_points,
+        normalize=cfg.normalize, env_stats=env_stats,
+        train=True,
+        aug_cfg={"yaw_deg":cfg.yaw_deg, "point_jitter":cfg.point_jitter,
+                 "drop_point":cfg.drop_point, "drop_frame":cfg.drop_frame},
+    )
+    val_ds = ActionSegmentDataset(
+        index=[index[i] for i in val_rows],
+        action_to_id=act2id,
+        max_frames=cfg.max_frames, max_points=cfg.max_points,
+        normalize=cfg.normalize, env_stats=env_stats,
+        train=False
+    )
+
+    # sanity check: fixed T
+    _check = train_ds[0]["sequence"].shape
+    assert _check[0] == cfg.max_frames, f"Expected T={cfg.max_frames}, got {_check[0]}."
+
+    train_loader = DataLoader(
+        train_ds, batch_size=cfg.batch_size, shuffle=True,
+        num_workers=cfg.num_workers, pin_memory=cfg.pin_memory
+    )
+    val_loader = DataLoader(
+        val_ds, batch_size=cfg.batch_size, shuffle=False,
+        num_workers=cfg.num_workers, pin_memory=cfg.pin_memory
+    )
+
+    # 6) Model
+    model = ActionNet_PointNet_TCN(
         num_actions=num_actions,
-        input_features=4,
-        hidden_dim=512
-    )
-    
-    # Count parameters
-    num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Model parameters: {num_params:,}")
-    
-    # Create trainer
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"Using device: {device}")
-    if device == 'cuda':
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
-        print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
-    
-    trainer = Trainer(model, device=device)
-    
-    # Train
-    print("\nStarting training...")
-    history = trainer.train(
-        train_loader=train_loader,
-        val_loader=val_loader,
-        num_epochs=40,
-        learning_rate=0.001
-    )
-    
-    # Plot results
-    trainer.plot_history()
-    
-    # Save final model
-    torch.save(model.state_dict(), 'final_model.pth')
-    
-    # Save model config
-    config = {
-        'num_persons': num_persons,
-        'num_actions': num_actions,
-        'input_features': 4,
-        'hidden_dim': 512,
-        'max_frames': 128,
-        'max_points': 150
-    }
-    
-    with open('model_config.json', 'w') as f:
-        json.dump(config, f, indent=2)
-    
-    print("\nTraining complete!")
-    print("Saved files:")
-    print("  - best_model.pth (best validation model)")
-    print("  - final_model.pth (final model)")
-    print("  - model_config.json (model configuration)")
-    print("  - person_encoder_classes.npy (person label mapping)")
-    print("  - action_encoder_classes.npy (action label mapping)")
-    print("  - training_history.png (training plots)")
+        input_features=cfg.input_features,
+        frame_dim=cfg.frame_dim,
+        tcn_layers=cfg.tcn_layers,
+        tcn_dropout=cfg.tcn_dropout,
+        kernel=cfg.kernel,
+    ).to(cfg.device)
+
+    # 7) Optimizer, scheduler, loss
+    opt = optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+    ce = nn.CrossEntropyLoss(label_smoothing=cfg.label_smoothing)
+    sched = optim.lr_scheduler.CosineAnnealingLR(opt, T_max=cfg.epochs)
+
+    history = {"train_loss": [], "val_loss": [], "train_acc": [], "val_acc": []}
+    best_val = float("inf")
+    best_epoch = -1
+
+    # 8) Train loop
+    for epoch in range(1, cfg.epochs + 1):
+        model.train()
+        total = 0
+        loss_sum = 0.0
+        correct = 0
+
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch:02d}/{cfg.epochs}", leave=False)
+        for batch in pbar:
+            x = batch["sequence"].to(cfg.device)  # (B,T,P,F)
+            y = batch["action_id"].to(cfg.device)
+
+            opt.zero_grad()
+            logits = model(x)
+            loss = ce(logits, y)
+            loss.backward()
+            if cfg.grad_clip is not None:
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.grad_clip)
+            opt.step()
+
+            total += x.size(0)
+            loss_sum += loss.item()
+            correct += (logits.argmax(1) == y).sum().item()
+
+            pbar.set_postfix(loss=loss.item(), acc=100.0*correct/max(total,1))
+
+        train_loss = loss_sum / max(total, 1)
+        train_acc  = 100.0 * correct / max(total, 1)
+
+        # Val
+        val_loss, val_acc = evaluate(model, val_loader, cfg.device, label_smoothing=cfg.label_smoothing)
+
+        # Step LR
+        sched.step()
+
+        # Log
+        history["train_loss"].append(train_loss)
+        history["val_loss"].append(val_loss)
+        history["train_acc"].append(train_acc)
+        history["val_acc"].append(val_acc)
+
+        print(f"Epoch {epoch:02d}/{cfg.epochs} | "
+              f"Train: loss {train_loss:.4f}, A {train_acc:.2f}% | "
+              f"Val: loss {val_loss:.4f}, A {val_acc:.2f}%")
+
+        # Checkpoint & early stopping
+        improved = val_loss < best_val
+        if improved:
+            best_val = val_loss
+            best_epoch = epoch
+            (cfg.outdir / "models").mkdir(parents=True, exist_ok=True)
+            torch.save(model.state_dict(), cfg.outdir / "models/best_model_action.pth")
+            print("[Saved] best_model_action.pth")
+
+        if epoch - best_epoch >= cfg.patience:
+            print(f"Early stopping at epoch {epoch} (no val improvement for {cfg.patience} epochs).")
+            break
+
+    # 9) Final artifacts
+    torch.save(model.state_dict(), cfg.outdir / "models/final_model_action.pth")
+    plot_history(history, cfg.outdir / "training_history_action.png")
+
+    with open(cfg.outdir / "model_config_action.json", "w") as f:
+        json.dump({
+            "num_actions": num_actions,
+            "input_features": cfg.input_features,
+            "frame_dim": cfg.frame_dim,
+            "tcn_layers": cfg.tcn_layers,
+            "tcn_dropout": cfg.tcn_dropout,
+            "kernel": cfg.kernel,
+            "max_frames": cfg.max_frames,
+            "max_points": cfg.max_points,
+            "normalize": cfg.normalize,
+            "label_smoothing": cfg.label_smoothing,
+            "weight_decay": cfg.weight_decay,
+            "lr": cfg.lr,
+        }, f, indent=2)
+
+    print("\nDone!")
+    print(f"Train samples: {len(train_ds)} | Val samples: {len(val_ds)}")
+    print(f"Outputs in: {cfg.outdir.resolve()}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
-

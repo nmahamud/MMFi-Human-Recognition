@@ -1,209 +1,140 @@
 """
-Deep learning models for mmWave human activity and person recognition.
+Action-only model for MMFi mmWave segments.
+Architecture: PointNet (per frame) -> Temporal ConvNet (dilated 1D convs)
+-> Masked attention pooling -> Action classifier.
+
+Input:  x  (B, T, P, F)  with center-padded zeros in time dimension
+Output: action_logits (B, num_actions)
+
+Notes:
+- Ignores padded frames by using a learned temporal attention with masking.
+- Fast, stable, and well-suited for short sequences like T≈25–35.
 """
 
+from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
-class MMWavePointNet(nn.Module):
-    """
-    PointNet-based architecture for mmWave point cloud processing.
-    Handles variable-sized point clouds and temporal sequences.
-    """
-    
-    def __init__(self, num_persons: int, num_actions: int, 
-                 input_features: int = 4, hidden_dim: int = 128):
+# ------------ Frame encoder (PointNet-style) ------------
+class PointNetFrameEncoder(nn.Module):
+    def __init__(self, in_feats: int = 4, out_dim: int = 256, proj_dropout: float = 0.1):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Conv1d(in_feats, 64, 1),  nn.BatchNorm1d(64),  nn.ReLU(inplace=True),
+            nn.Conv1d(64, 128, 1),       nn.BatchNorm1d(128), nn.ReLU(inplace=True),
+            nn.Conv1d(128, out_dim, 1),  nn.BatchNorm1d(out_dim), nn.ReLU(inplace=True),
+        )
+        self.proj = nn.Sequential(
+            nn.Linear(out_dim, out_dim),
+            nn.LayerNorm(out_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(proj_dropout),
+        )
+
+    def forward(self, x_btp: torch.Tensor) -> torch.Tensor:
+        # x_btp: (B*T, P, F)
+        x = x_btp.transpose(1, 2)          # (B*T, F, P)
+        feat = self.mlp(x)                 # (B*T, D, P)
+        global_feat = feat.max(dim=2).values   # (B*T, D)
+        return self.proj(global_feat)          # (B*T, D)
+
+
+# ------------ Temporal Conv Block (Res + Dilation) ------------
+class ResTCNBlock(nn.Module):
+    def __init__(self, dim: int, kernel: int = 3, dilation: int = 1, dropout: float = 0.2):
+        super().__init__()
+        pad = (kernel - 1) // 2 * dilation
+        self.net = nn.Sequential(
+            nn.Conv1d(dim, dim, kernel_size=kernel, padding=pad, dilation=dilation),
+            nn.BatchNorm1d(dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Conv1d(dim, dim, kernel_size=kernel, padding=pad, dilation=dilation),
+            nn.BatchNorm1d(dim),
+        )
+        self.act = nn.ReLU(inplace=True)
+
+    def forward(self, x):  # x: (B, D, T)
+        y = self.net(x)
+        return self.act(x + y)
+
+
+# ------------ Masked temporal attention pooling ------------
+class MaskedAttentionPool(nn.Module):
+    def __init__(self, dim: int):
+        super().__init__()
+        self.score = nn.Linear(dim, 1)
+
+    def forward(self, seq, mask):
         """
-        Initialize the model.
-        
-        Args:
-            num_persons: Number of different persons to classify
-            num_actions: Number of different actions to classify
-            input_features: Number of features per point (x, y, z, doppler/intensity)
-            hidden_dim: Hidden dimension size
+        seq:  (B, T, D)
+        mask: (B, T)  True for real frames, False for padded
         """
-        super(MMWavePointNet, self).__init__()
-        
-        self.num_persons = num_persons
-        self.num_actions = num_actions
-        
-        # Point-wise feature extraction (shared across all points)
-        self.point_feat = nn.Sequential(
-            nn.Conv1d(input_features, 64, 1),
-            nn.BatchNorm1d(64),
-            nn.ReLU(),
-            nn.Conv1d(64, 128, 1),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-            nn.Conv1d(128, 256, 1),
-            nn.BatchNorm1d(256),
-            nn.ReLU()
+        B, T, D = seq.shape
+        logits = self.score(seq).squeeze(-1)  # (B, T)
+
+        # very negative for padded positions so they get ~0 weight
+        neg_inf = torch.finfo(seq.dtype).min / 2
+        logits = logits.masked_fill(~mask, neg_inf)
+
+        attn = torch.softmax(logits, dim=1)   # (B, T)
+        attn = attn.unsqueeze(-1)             # (B, T, 1)
+        pooled = (seq * attn).sum(dim=1)      # (B, D)
+        return pooled, attn.squeeze(-1)
+
+
+# ------------ Full action model ------------
+class ActionNet_PointNet_TCN(nn.Module):
+    def __init__(
+        self,
+        num_actions: int,
+        input_features: int = 4,
+        frame_dim: int = 256,
+        tcn_layers: int = 3,
+        tcn_dropout: float = 0.2,
+        kernel: int = 3,
+    ):
+        super().__init__()
+        self.frame_enc = PointNetFrameEncoder(input_features, frame_dim, proj_dropout=0.1)
+
+        # stack of dilated ResTCN blocks: dilation = 1,2,4,...
+        blocks = []
+        for i in range(tcn_layers):
+            blocks.append(ResTCNBlock(frame_dim, kernel=kernel, dilation=2**i, dropout=tcn_dropout))
+        self.tcn = nn.Sequential(*blocks)
+
+        self.pool = MaskedAttentionPool(frame_dim)
+
+        self.cls = nn.Sequential(
+            nn.Linear(frame_dim, frame_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.4),
+            nn.Linear(frame_dim, num_actions),
         )
-        
-        # Global feature extraction (max pooling across points)
-        self.global_feat = nn.Sequential(
-            nn.Linear(256, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.3)
-        )
-        
-        # Temporal processing with LSTM
-        self.lstm = nn.LSTM(
-            input_size=hidden_dim,
-            hidden_size=hidden_dim,
-            num_layers=2,
-            batch_first=True,
-            dropout=0.3,
-            bidirectional=True
-        )
-        
-        # Classification heads
-        lstm_output_dim = hidden_dim * 2  # Bidirectional
-        
-        self.person_classifier = nn.Sequential(
-            nn.Linear(lstm_output_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(hidden_dim, num_persons)
-        )
-        
-        self.action_classifier = nn.Sequential(
-            nn.Linear(lstm_output_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(hidden_dim, num_actions)
-        )
-    
+
+    @torch.no_grad()
+    def _frame_mask(self, x):
+        # x: (B, T, P, F); a frame is padded if all P,F are zero
+        return (x.abs().sum(dim=(2, 3)) > 0)  # (B, T) True = real
+
     def forward(self, x):
         """
-        Forward pass.
-        
-        Args:
-            x: Input tensor of shape (batch, num_frames, num_points, features)
-            
-        Returns:
-            person_logits: (batch, num_persons)
-            action_logits: (batch, num_actions)
+        x: (B, T, P, F)
+        returns: action_logits (B, num_actions)
         """
-        batch_size, num_frames, num_points, num_features = x.shape
-        
-        # Process each frame
-        frame_features = []
-        for t in range(num_frames):
-            frame = x[:, t, :, :]  # (batch, num_points, features)
-            
-            # Transpose for Conv1d: (batch, features, num_points)
-            frame = frame.transpose(1, 2)
-            
-            # Extract point-wise features
-            point_feat = self.point_feat(frame)  # (batch, 256, num_points)
-            
-            # Global max pooling across points
-            global_feat = torch.max(point_feat, dim=2)[0]  # (batch, 256)
-            
-            # Apply global feature network
-            global_feat = self.global_feat(global_feat)  # (batch, hidden_dim)
-            
-            frame_features.append(global_feat)
-        
-        # Stack frame features: (batch, num_frames, hidden_dim)
-        sequence = torch.stack(frame_features, dim=1)
-        
-        # Process temporal sequence with LSTM
-        lstm_out, _ = self.lstm(sequence)  # (batch, num_frames, hidden_dim*2)
-        
-        # Use the last time step for classification
-        final_feat = lstm_out[:, -1, :]  # (batch, hidden_dim*2)
-        
-        # Classify person and action
-        person_logits = self.person_classifier(final_feat)
-        action_logits = self.action_classifier(final_feat)
-        
-        return person_logits, action_logits
+        B, T, P, F = x.shape
+        mask = self._frame_mask(x)                    # (B,T)
 
+        x_btp = x.reshape(B * T, P, F)
+        frame_emb = self.frame_enc(x_btp).view(B, T, -1)  # (B,T,D)
 
-class MMWave3DCNN(nn.Module):
-    """
-    3D CNN architecture for voxelized mmWave data.
-    Processes spatial-temporal voxel grids.
-    """
-    
-    def __init__(self, num_persons: int, num_actions: int,
-                 input_channels: int = 1, hidden_dim: int = 128):
-        """
-        Initialize the 3D CNN model.
-        
-        Args:
-            num_persons: Number of different persons to classify
-            num_actions: Number of different actions to classify
-            input_channels: Number of input channels
-            hidden_dim: Hidden dimension size
-        """
-        super(MMWave3DCNN, self).__init__()
-        
-        self.num_persons = num_persons
-        self.num_actions = num_actions
-        
-        # 3D Convolutional layers
-        self.conv1 = nn.Sequential(
-            nn.Conv3d(input_channels, 32, kernel_size=3, padding=1),
-            nn.BatchNorm3d(32),
-            nn.ReLU(),
-            nn.MaxPool3d(2)
-        )
-        
-        self.conv2 = nn.Sequential(
-            nn.Conv3d(32, 64, kernel_size=3, padding=1),
-            nn.BatchNorm3d(64),
-            nn.ReLU(),
-            nn.MaxPool3d(2)
-        )
-        
-        self.conv3 = nn.Sequential(
-            nn.Conv3d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm3d(128),
-            nn.ReLU(),
-            nn.AdaptiveMaxPool3d((4, 4, 4))
-        )
-        
-        # Fully connected layers
-        self.fc = nn.Sequential(
-            nn.Linear(128 * 4 * 4 * 4, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.5)
-        )
-        
-        # Classification heads
-        self.person_classifier = nn.Linear(hidden_dim, num_persons)
-        self.action_classifier = nn.Linear(hidden_dim, num_actions)
-    
-    def forward(self, x):
-        """
-        Forward pass.
-        
-        Args:
-            x: Input voxel grid (batch, channels, depth, height, width)
-            
-        Returns:
-            person_logits: (batch, num_persons)
-            action_logits: (batch, num_actions)
-        """
-        x = self.conv1(x)
-        x = self.conv2(x)
-        x = self.conv3(x)
-        
-        # Flatten
-        x = x.view(x.size(0), -1)
-        
-        # Fully connected
-        x = self.fc(x)
-        
-        # Classify
-        person_logits = self.person_classifier(x)
-        action_logits = self.action_classifier(x)
-        
-        return person_logits, action_logits
+        # TCN expects (B, D, T)
+        z = frame_emb.transpose(1, 2)                 # (B,D,T)
+        z = self.tcn(z)                                # (B,D,T)
+        z = z.transpose(1, 2)                          # (B,T,D)
 
+        pooled, _ = self.pool(z, mask)                 # (B,D)
+        logits = self.cls(pooled)                      # (B,num_actions)
+        return logits
