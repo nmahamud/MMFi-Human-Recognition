@@ -7,6 +7,8 @@ This repository implements a **two-stage deep learning pipeline** for human acti
 
 ---
 
+Dataset located here: https://drive.google.com/file/d/1Ucur9abUMbZIAybi76D1JmG5yXIPi8en/view?usp=sharing
+
 ## Project Structure
 
 ```
