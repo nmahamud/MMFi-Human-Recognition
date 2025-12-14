@@ -34,7 +34,51 @@ What is/are the current state of the art and what are the limitations to current
 
 
 \section{Methodology}
-Describe in detail what you're doing. The level of detail should be sufficient for someone to implement your work after reading this section.
+
+Our approach to action recognition from mmWave radar data employs a two-stage pipeline that first estimates human skeleton joint positions from raw point clouds, then uses the skeleton sequences for action classification.
+
+\subsection{Stage 1: Skeleton Estimation from mmWave Point Clouds}
+
+The first stage addresses the challenge of extracting meaningful human pose information from sparse mmWave radar point clouds. We employ a PointNet++ architecture that performs hierarchical feature learning on unstructured 3D point data.
+
+\subsubsection{PointNet++ Regressor}
+PointNet++ operates on point cloud sequences with shape $[B, T, N, C]$, where $B$ is batch size, $T$ is the number of temporal frames, $N$ is the number of points per frame ($\sim 512$), and $C$ is the coordinate dimensionality (3D: $x, y, z$). 
+
+The model uses a hierarchical structure:
+\begin{enumerate}
+    \item \textbf{Farthest Point Sampling (FPS)}: Intelligently downsamples point clouds by selecting maximally distant points, reducing computational complexity while preserving spatial information.
+    \item \textbf{Set Abstraction Layers}: Apply local feature aggregation through ball queries and multi-layer perceptrons to capture hierarchical geometric patterns.
+    \item \textbf{Regression Head}: Outputs 17-joint skeleton coordinates in COCO format with shape $[B, T, 17, 3]$.
+\end{enumerate}
+
+The model is trained to minimize Mean Per Joint Position Error (MPJPE) between predicted skeleton coordinates and ground truth annotations from the MM-Fi dataset. This enables the network to learn the spatial relationship between mmWave reflections and human body configuration.
+
+\subsection{Stage 2: Action Classification from Skeleton Sequences}
+
+Once skeleton sequences are obtained, the second stage performs action classification using the temporal and structural information encoded in the skeleton.
+
+\subsubsection{Spatial-Temporal Graph Convolutional Network (ST-GCN)}
+We use ST-GCN, which models the skeleton as a graph where joints are nodes and anatomical connections are edges. The COCO 17-keypoint skeleton has fixed edges representing limbs and body connections (e.g., shoulder-elbow, elbow-wrist for arms; hip-knee-ankle for legs).
+
+The model architecture includes:
+\begin{enumerate}
+    \item \textbf{Graph Definition}: Constructs an adjacency matrix $A \in \mathbb{R}^{17 \times 17}$ representing skeleton connectivity, normalized using degree-based normalization: $\tilde{A} = D^{-1/2}(A + I)D^{-1/2}$.
+    \item \textbf{Graph Convolution Layers}: Apply learnable convolutions across the skeleton graph to capture spatial relationships between joints within each frame.
+    \item \textbf{Temporal Convolution Layers}: Convolve along the temporal dimension to model action dynamics across frames.
+    \item \textbf{Classification Head}: Produces logits for 22 action classes.
+\end{enumerate}
+
+Cross-entropy loss guides the network to correctly classify actions based on the spatio-temporal patterns of skeleton motion.
+
+\subsection{Training Strategy}
+
+We employ sequential stage training:
+\begin{itemize}
+    \item \textbf{Stage 1}: Train the PointNet++ regressor for 30 epochs using Adam optimizer with learning rate $0.001$ and MPJPE loss.
+    \item \textbf{Stage 2}: Freeze Stage 1 weights and train the ST-GCN classifier for 100 epochs with the same optimizer and learning rate, using cross-entropy loss.
+\end{itemize}
+
+This sequential approach allows Stage 1 to focus on accurate skeleton estimation, which then provides high-quality input features for Stage 2. Post-processing includes anti-jitter smoothing with a temporal averaging filter to reduce prediction noise and improve temporal consistency.
 
 \section{Dataset and Experiments}
 The dataset we used is called MM-Fi: Multi-Modal Non-Intrusive 4D Human Dataset. It contains mmWave radar data, RGB videos, depth videos, and skeleton data of 40 subjects performing 27 different actions. 
