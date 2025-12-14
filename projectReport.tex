@@ -121,7 +121,20 @@ During Stage 1 training (skeleton estimation), we apply weighted random sampling
 What are the metrics being used to evaluate your system and why? Examples: True Positive Rate, Accuracy, F-1 Score, Balanced Accuracy, etc.
 
 \subsection{Baselines}
-Our dataset is clearly labeled, so we compared our results against the ground truth labels provided in the dataset.
+
+We compare our two-stage pipeline approach against multiple baselines to validate the effectiveness of our methodology:
+
+\begin{enumerate}
+    \item \textbf{Skeleton-Only Baseline (ST-GCN on Ground Truth)}: This baseline uses the ground truth skeleton annotations from the MM-Fi dataset as direct input to the ST-GCN classifier, bypassing Stage 1 entirely. This establishes the upper-bound performance when skeleton information is perfectly available, providing insight into Stage 2 classification capability independently.
+    
+    \item \textbf{End-to-End PointNet++ Baseline}: A simplified model that attempts to classify actions directly from mmWave point clouds without explicit skeleton estimation. The PointNet++ architecture is modified with a classification head instead of a regression head, operating end-to-end on the raw point cloud sequences. This baseline demonstrates the challenges of learning action-relevant features directly from sparse, unstructured mmWave data.
+    
+    \item \textbf{3D CNN Baseline}: A standard 3D Convolutional Neural Network applied to spatio-temporal mmWave point cloud sequences, voxelized into regular 3D grids. This represents a traditional deep learning approach for temporal action recognition from sensor data.
+    
+    \item \textbf{Hand-Crafted Features Baseline}: Action classification using hand-crafted features extracted from mmWave point clouds (e.g., point cloud density, centroid motion, velocity statistics) with classical machine learning classifiers (SVM, Random Forest). This baseline represents non-deep learning approaches commonly used in radar-based activity recognition.
+\end{enumerate}
+
+These baselines allow us to evaluate: (1) the importance of two-stage decomposition versus end-to-end learning, (2) the benefit of skeleton-based representations for action classification, (3) the advantage of graph-based models over standard CNNs for skeleton data, and (4) the necessity of deep learning approaches for this radar-based recognition task.
 
 \subsection{Results}
 This is the most important part of the report. Please include graphs to present your results and explain them.
