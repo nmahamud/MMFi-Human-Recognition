@@ -37,9 +37,10 @@ What is/are the current state of the art and what are the limitations to current
 Describe in detail what you're doing. The level of detail should be sufficient for someone to implement your work after reading this section.
 
 \section{Dataset and Experiments}
-If using existing dataset: Describe what dataset has - all the fields and why you're using it. How many subjects? How many samples?
+The dataset we used is called MM-Fi: Multi-Modal Non-Intrusive 4D Human Dataset. It contains mmWave radar data, RGB videos, depth videos, and skeleton data of 40 subjects performing 27 different actions. 
+There were 4 different environments. Over 11,000 samples were collected across all subjects and actions where each complete action is represented over multiple frames.
 
-If collecting you own data: Describe what data is being collected, how? How many subjects? How many samples?
+We pre-processed the data to remove the outliers and normalized the data by padding the data. After this, we kept 22 activities with a total of 10,500 samples.
 
 \section{Evaluation}
 
