@@ -81,10 +81,39 @@ We employ sequential stage training:
 This sequential approach allows Stage 1 to focus on accurate skeleton estimation, which then provides high-quality input features for Stage 2. Post-processing includes anti-jitter smoothing with a temporal averaging filter to reduce prediction noise and improve temporal consistency.
 
 \section{Dataset and Experiments}
-The dataset we used is called MM-Fi: Multi-Modal Non-Intrusive 4D Human Dataset. It contains mmWave radar data, RGB videos, depth videos, and skeleton data of 40 subjects performing 27 different actions. 
-There were 4 different environments. Over 11,000 samples were collected across all subjects and actions where each complete action is represented over multiple frames.
 
-We pre-processed the data to remove the outliers and normalized the data by padding the data. After this, we kept 22 activities with a total of 10,500 samples.
+\subsection{MM-Fi Dataset Overview}
+
+The dataset we used is the MM-Fi: Multi-Modal Non-Intrusive 4D Human Dataset, a comprehensive multi-modal sensing dataset designed for human activity recognition. The dataset includes:
+
+\begin{itemize}
+    \item \textbf{Modalities}: mmWave radar point clouds, RGB video, depth video, and skeleton keypoint annotations
+    \item \textbf{Subjects}: 40 different subjects
+    \item \textbf{Actions}: 27 distinct actions (e.g., walking, running, jumping, sitting, standing, picking up objects)
+    \item \textbf{Environments}: 4 different indoor environments with varying clutter and occlusion
+    \item \textbf{Raw Data}: Over 11,000 action samples collected across all subject and action combinations
+\end{itemize}
+
+Each action is performed multiple times by each subject, resulting in diverse sequences that capture natural variations in execution speed, style, and body configuration.
+
+\subsection{Data Preprocessing and Filtering}
+
+The raw dataset was preprocessed to improve data quality and align with our model requirements:
+
+\begin{enumerate}
+    \item \textbf{Outlier Removal}: Removed corrupted frames and invalid point clouds (e.g., frames with excessive noise or missing data).
+    \item \textbf{Action Filtering}: Removed actions A01, A02, A03, and A06 due to insufficient and poor-quality data, reducing the set to 22 usable actions.
+    \item \textbf{Segment Filtering}: Extracted action segments with frame lengths between 10 and 30 frames, ensuring sequences are long enough for meaningful temporal modeling while remaining computationally tractable.
+    \item \textbf{Data Normalization}: Applied padding and alignment to handle variable-length sequences, normalizing skeleton coordinates to a canonical reference frame.
+\end{enumerate}
+
+After preprocessing, the dataset contained 11,389 action segment samples with balanced representation across subjects and actions.
+
+\subsection{Train-Validation Split}
+
+We split the processed dataset into training (80\%) and validation (20\%) sets using stratified random sampling with respect to action class. This ensures both sets have comparable action distributions and prevents bias toward frequently occurring actions during training. The stratification guarantees approximately $9,111$ training samples and $2,278$ validation samples.
+
+During Stage 1 training (skeleton estimation), we apply weighted random sampling to address class imbalance and ensure the model learns equally well across all action types. The sample weights are computed inversely proportional to action class frequencies.
 
 \section{Evaluation}
 
