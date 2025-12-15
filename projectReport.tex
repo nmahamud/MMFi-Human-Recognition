@@ -1,6 +1,7 @@
 \documentclass[sigconf,authorversion,nonacm,11pt]{acmart}
 
 \usepackage{booktabs} % For formal tables
+\usepackage{graphicx}
 
 
 \begin{document}
@@ -28,7 +29,17 @@ Existing works have focused on identifying actions in a completely empty room wi
 
 \section{Related Work}
 
-What is/are the current state of the art and what are the limitations to current approaches?
+\subsection{mmWave-based Human Activity Recognition}
+Human Activity Recognition (HAR) using Millimeter-wave (mmWave) radars has gotten popular due to its great low-light performance and its non-intrusive nature. Early approaches primarily utilized micro-Doppler signatures or Range-Doppler Maps (RDMs) combined with Convolutional Neural Networks (CNNs) to classify activities. While effective for simple motions, these low-level representations often discard critical spatial information required for distinguishing complex actions.
+As commercial MIMO radar systems became more common, generating sparse 3D point clouds has become feasible. To process this unstructured data, deep learning architectures like PointNet and PointNet++ were introduced. These models directly work with 3D point clouds without the need for voxelization, thus keeping fine-grained geometric details needed for accurate recognition.
+
+\subsection{Skeleton-based Action Recognition}
+To handle complex interactions, recent research has shifted towards a skeleton-based approach, which separates HAR into skeleton estimation and action classification.
+For skeleton estimation from mmWave, methods such as \textit{mmMesh} and \textit{mmPose} have demonstrated that human joints can be recovered from sparse radar returns by leveraging deep hierarchical networks. This intermediate skeleton representation is not affected by background noise and subject appearance.
+For action classification, Graph Convolutional Networks (GCNs) have become the standard. The Spatial-Temporal Graph Convolutional Network (ST-GCN) models the human body as a graph of joints connected by spatial (limbs) and temporal (motion) edges. This effectively captures the dynamic dependencies between joints, significantly outperforming traditional methods that treat skeleton data as simple vector sequences.
+
+\subsection{Multi-Modal Datasets}
+Data availability is critical for training deep supervised models. The \textit{MM-Fi} dataset provides a comprehensive, multi-modal benchmark containing synchronized mmWave point clouds, LiDAR, RGB-D, and ground-truth skeleton annotations. Unlike previous small-scale radar datasets, MM-Fi covers diverse subjects and environments, enabling the rigorous training and evaluation of multi-stage pipelines like the one proposed in this work.
 
 
 \section{Methodology}
@@ -116,7 +127,12 @@ During Stage 1 training (skeleton estimation), we apply weighted random sampling
 \section{Evaluation}
 
 \subsection{Metrics}
-What are the metrics being used to evaluate your system and why? Examples: True Positive Rate, Accuracy, F-1 Score, Balanced Accuracy, etc.
+To comprehensively evaluate our two-stage pipeline, we utilize distinct metrics tailored to each stage's objective:
+
+\begin{itemize}
+    \item \textbf{Mean Per Joint Position Error (MPJPE)}: Used for the skeleton estimation stage. This computes the average Euclidean distance (in millimeters) between the predicted joint coordinates and the ground truth. A lower MPJPE indicates that the model is correctly reconstructing the geometric configuration of the human body.
+    \item \textbf{Top-1 Accuracy}: Used for the final action classification stage. We report the percentage of test sequences where the model's highest-probability prediction matches the correct ground-truth action label. This directly measures the system's end-to-end effectiveness in distinguishing between different human activities.
+\end{itemize}
 
 \subsection{Baselines}
 
@@ -135,10 +151,55 @@ We compare our two-stage pipeline approach against multiple baselines to validat
 These baselines allow us to evaluate: (1) the importance of two-stage decomposition versus end-to-end learning, (2) the benefit of skeleton-based representations for action classification, (3) the advantage of graph-based models over standard CNNs for skeleton data, and (4) the necessity of deep learning approaches for this radar-based recognition task.
 
 \subsection{Results}
-This is the most important part of the report. Please include graphs to present your results and explain them.
+We evaluated our pipeline for each stage.
+\begin{enumerate}
+    \item \textbf{Stage 1 Performance}: The PointNet++ regressor showed steady convergence, reducing the validation loss from 0.15 to approximately 0.087. The final model achieved a Mean Per Joint Position Error (MPJPE) of \textbf{0.075 meters (7.5 cm)}. This indicates that despite the sparsity of the mmWave point clouds, the model successfully learned to infer accurate human body configurations.
+    
+    \item \textbf{Stage 2 Performance}: The ST-GCN classifier trained on these estimated skeletons achieved high performance rapidly. By epoch 6, the model had already surpassed 93\% accuracy. The best model achieved a final \textbf{Top-1 Accuracy of 96.80\%} on the validation set. 
+\end{enumerate}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.45\textwidth]{stage1_metrics.png}
+    \caption{Stage 1: PointNet++ MPJPE and Validation Loss.}
+    \label{fig:stage1}
+\end{figure}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.45\textwidth]{stage2_accuracy.png}
+    \caption{Stage 2: ST-GCN Classification Accuracy, reaching ~96.8\%.}
+    \label{fig:stage2}
+\end{figure}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.45\textwidth]{visual_result.jpeg}
+    \caption{Qualitative results identifying the subject's skeleton from the point cloud.}
+    \label{fig:qualitative}
+\end{figure}
+
+Figure \ref{fig:stage1} illustrates the training progress of the Stage 1 PointNet++ regressor. The validation loss and MPJPE decrease sharply within the first 10 epochs and continuing to improve steadily, indicating the model effectively learns to map sparse points to skeleton joints without overfitting.
+    
+Figure \ref{fig:stage2} shows the classification accuracy for the Stage 2 ST-GCN. The model rapidly converges, reaching over 90\% accuracy in just a few epochs. This fast learning curve suggests that the estimated skeletons from Stage 1 provide a highly distinct and noise-free representation of human actions, allowing the classifier to easily distinguish between classes.
+
+Figure \ref{fig:qualitative} visualizes the system's output: it accurately reconstructs the human skeleton (shown in the image) from the sparse input data, verifying our quantitative metrics with visual proof of the model's geometric understanding.
+
+\section{Discussion: Post-Presentation Architecture Changes}
+Following our initial presentation, we significantly revised our modeling strategy. Our original approach attempted to predict actions directly from the raw point clouds using a complex end-to-end architecture:
+\begin{itemize}
+    \item \textbf{Input}: Raw Point Clouds (per frame).
+    \item \textbf{Backbone}: PointNet for spatial feature extraction.
+    \item \textbf{Temporal Aggregation}: An Inception-Style Temporal CNN (incorporating Multi-kernel convolutions, Dilations, and DropPath regularization) followed by a Masked Multi-Head Attention Pool.
+    \item \textbf{Output}: Action Classification Head.
+\end{itemize}
+
+While theoretically powerful, this "black box" approach struggled to generalize, likely due to the difficulty of disentangling meaningful human motion from the noisy background inherent in mmWave data. We therefore pivoted to the current explicit intermediate representation approach. By training a dedicated regressor to first generate a human skeleton, we force the model to solve a grounded geometric problem before attempting classification. This not only improved stability but also provided interpretability—we can now visualize exactly \textit{what} the model "sees" (as shown in Figure \ref{fig:qualitative}), verifying that the system is tracking the human user rather than overfitting to environmental artifacts.
+
+Overall, these results demonstrate the effectiveness of decomposing the problem: the intermediate skeleton representation is accurate enough to serve as a robust input for determining complex actions, outperforming many traditional signal-based baselines.
 
 \section{Conclusion}
-Describe the impact your project will have within the field, community, and wider audience.
+In this work, we presented a robust two-stage pipeline for human activity recognition using mmWave radar. By explicitly decomposing the task into skeleton estimation followed by action classification, we achieved a high Top-1 accuracy of 96.80\% on the MM-Fi dataset. Our experimental results highlight that the intermediate skeleton representation is key to overcoming the inherent noise of radar data, providing both stability and interpretability that end-to-end ``black box'' models lacked. Ultimately, this project demonstrates that privacy-preserving mmWave sensing is a viable, high-performance alternative to optical cameras for real-world applications in healthcare and smart environments.
 
 
 % \bibliographystyle{ACM-Reference-Format}
