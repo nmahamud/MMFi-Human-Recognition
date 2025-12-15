@@ -24,8 +24,11 @@
 \maketitle
 
 \section{Introduction}
-Identifying actions that humans perform is always a challenging thing a computer has to do. But it enables us to use the computer in different ways, often without even touching anything. 
-Existing works have focused on identifying actions in a completely empty room with only a single person in view. With our project, we should be closer to recognizing the actions even though the radar is picking up other information.
+Human Activity Recognition (HAR) has become a cornerstone technology for applications ranging from smart home automation and elderly care to touchless human-computer interaction. Traditionally, HAR systems have relied heavily on optical cameras or wearable sensors. While effective, camera-based solutions raise significant privacy concerns and struggle in low-light conditions, whereas wearable devices can be intrusive and inconvenient for long-term use.
+
+Millimeter-wave (mmWave) radar has emerged as a compelling alternative that addresses these limitations. It is privacy-preserving—capturing only reflections rather than identifiable visual features—and operates robustly in darkness or through occlusions. However, transitioning from optical to radar sensing introduces new challenges. Unlike the dense, structured data of an image, mmWave radar produces sparse, unstructured point clouds with significant noise and environmental clutter.
+
+In this project, we propose a robust deep learning pipeline to recognize human actions from mmWave radar data. While many existing works focus on simplified scenarios with single subjects in empty rooms, we aim to tackle more complex, realistic data provided by the MM-Fi dataset. Our approach moves beyond "black box" classification by explicitly reconstructing the human skeleton as an intermediate step. By first estimating the geometric pose of the subject and then analyzing the temporal dynamics of that pose, our system achieves high accuracy and interpretability, bridging the gap between raw sensor data and meaningful action understanding.
 
 \section{Related Work}
 
