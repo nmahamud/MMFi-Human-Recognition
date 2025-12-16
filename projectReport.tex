@@ -16,7 +16,7 @@
 
 
 \begin{abstract}
-    This is a project that uses mmWave radar for action recognition of humans. 
+    Millimeter-wave (mmWave) radar offers a privacy forward alternative for Human Activity Recognition (HAR) but struggles with sparse, noisy data. To address this, we propose a two-stage pipeline that first reconstructs human skeletons from radar point clouds using PointNet++, and then classifies actions using a Spatial-Temporal Graph Convolutional Network (ST-GCN). Evaluated on the MM-Fi dataset, our approach achieves a low skeletal error of 7.5 cm (MPJPE) and a high Top-1 accuracy of 96.80\%. These results demonstrate that explicitly modeling human geometry enables robust, privacy-compliant action recognition from challenging radar data.
 \end{abstract}
 
 
@@ -33,7 +33,7 @@ In this project, we propose a robust deep learning pipeline to recognize human a
 \section{Related Work}
 
 \subsection{mmWave-based Human Activity Recognition}
-Human Activity Recognition (HAR) using Millimeter-wave (mmWave) radars has gotten popular due to its great low-light performance and its non-intrusive nature. Early approaches primarily utilized micro-Doppler signatures or Range-Doppler Maps (RDMs) combined with Convolutional Neural Networks (CNNs) to classify activities. While effective for simple motions, these low-level representations often discard critical spatial information required for distinguishing complex actions.
+HAR using mmWave radars has gotten popular due to its great low-light performance and its non-intrusive nature. Early approaches primarily utilized micro-Doppler signatures or Range-Doppler Maps (RDMs) combined with Convolutional Neural Networks (CNNs) to classify activities. While effective for simple motions, these low-level representations often discard critical spatial information required for distinguishing complex actions.
 As commercial MIMO radar systems became more common, generating sparse 3D point clouds has become feasible. To process this unstructured data, deep learning architectures like PointNet and PointNet++ were introduced. These models directly work with 3D point clouds without the need for voxelization, thus keeping fine-grained geometric details needed for accurate recognition.
 
 \subsection{Skeleton-based Action Recognition}
@@ -205,7 +205,8 @@ Overall, these results demonstrate the effectiveness of decomposing the problem:
 In this work, we presented a robust two-stage pipeline for human activity recognition using mmWave radar. By explicitly decomposing the task into skeleton estimation followed by action classification, we achieved a high Top-1 accuracy of 96.80\% on the MM-Fi dataset. Our experimental results highlight that the intermediate skeleton representation is key to overcoming the inherent noise of radar data, providing both stability and interpretability that end-to-end ``black box'' models lacked. Ultimately, this project demonstrates that privacy-preserving mmWave sensing is a viable, high-performance alternative to optical cameras for real-world applications in healthcare and smart environments.
 
 
-% \bibliographystyle{ACM-Reference-Format}
-% \bibliography{sample-bibliography} 
+\nocite{*}
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{references} 
 
 \end{document}
