@@ -2,6 +2,7 @@
 
 \usepackage{booktabs} % For formal tables
 \usepackage{graphicx}
+\usepackage{hyperref}
 
 
 \begin{document}
@@ -202,7 +203,7 @@ While theoretically powerful, this "black box" approach struggled to generalize,
 Overall, these results demonstrate the effectiveness of decomposing the problem: the intermediate skeleton representation is accurate enough to serve as a robust input for determining complex actions, outperforming many traditional signal-based baselines.
 
 \section{Conclusion}
-In this work, we presented a robust two-stage pipeline for human activity recognition using mmWave radar. By explicitly decomposing the task into skeleton estimation followed by action classification, we achieved a high Top-1 accuracy of 96.80\% on the MM-Fi dataset. Our experimental results highlight that the intermediate skeleton representation is key to overcoming the inherent noise of radar data, providing both stability and interpretability that end-to-end ``black box'' models lacked. Ultimately, this project demonstrates that privacy-preserving mmWave sensing is a viable, high-performance alternative to optical cameras for real-world applications in healthcare and smart environments.
+In this work, we presented a robust two-stage pipeline for human activity recognition using mmWave radar. By explicitly decomposing the task into skeleton estimation followed by action classification, we achieved a high Top-1 accuracy of 96.80\% on the MM-Fi dataset. Our experimental results highlight that the intermediate skeleton representation is key to overcoming the inherent noise of radar data, providing both stability and interpretability that end-to-end ``black box'' models lacked. Ultimately, this project demonstrates that privacy-preserving mmWave sensing is a viable, high-performance alternative to optical cameras for real-world applications in healthcare and smart environments. The source code for this project is available at \url{https://github.com/nmahamud/MMFi-Human-Recognition}.
 
 
 \nocite{*}
